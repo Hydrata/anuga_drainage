@@ -51,7 +51,11 @@ class SwmmHeadwallEngine:
             raise RuntimeError(
                 f"SWMM reached its END_TIME ({self.duration_s} s): pass duration_s >= the "
                 f"ANUGA final time")
-        next(self.sim)
+        try:
+            next(self.sim)
+        except StopIteration:
+            self.close()
+            raise RuntimeError("SWMM stopped before duration_s (END_TIME reached)") from None
         self.elapsed_s += 1
 
     def flows(self) -> np.ndarray:

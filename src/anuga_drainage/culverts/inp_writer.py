@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 DEFAULT_START = datetime(2020, 1, 1)
 DUMMY_LENGTH_M = 1.0
 DUMMY_N = 0.010
+END_MARGIN_S = 2
 
 
 @dataclass
@@ -88,7 +89,9 @@ def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
     """
     if routing_step <= 0 or routing_step > 1:
         raise ValueError("routing_step must be in (0, 1] s (the coupler strides 1 s)")
-    end = start + timedelta(seconds=int(duration_s))
+    # pyswmm raises StopIteration on the stride that REACHES END_TIME, so keep a
+    # margin: the engine refuses to stride past duration_s itself.
+    end = start + timedelta(seconds=int(duration_s) + END_MARGIN_S)
     layout = InpLayout(path=str(path))
     junctions, outfalls, conduits, xsections, losses, coords = [], [], [], [], [], []
     for i, c in enumerate(culverts):
