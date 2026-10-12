@@ -40,7 +40,9 @@ pip install -e .[pipedream]   # + pipedream backend (from git; see note below)
 This is `Hydrata/anuga_drainage`, a fork of
 [`stoiver/anuga_drainage`](https://github.com/stoiver/anuga_drainage) (remote
 `upstream`). It is treated like Hydrata's `anuga_core` fork: prefer upstream,
-keep every change small and upstreamable, and PR fixes back.
+keep every change small and upstreamable, and PR fixes back. The fork adds the
+headwall culvert coupler `anuga_drainage.culverts` (live SWMM 5.2 culvert
+hydraulics, epic 3585 spike): see [`docs/culverts.md`](docs/culverts.md).
 
 **Venv install (no conda).** Hydrata builds a plain Python 3.12 venv with the
 Hydrata `anuga_core` fork (4.x) installed from source, then this package
