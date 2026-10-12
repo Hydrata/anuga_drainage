@@ -43,12 +43,12 @@ def _as_culverts(culverts):
 
 class _Series:
     def __init__(self):
-        self.t, self.q, self.hw, self.tw, self.q_swmm = [], [], [], [], []
+        self.t, self.q, self.hw, self.tw, self.q_engine = [], [], [], [], []
 
     def as_arrays(self):
         return {k: np.asarray(v, dtype=float) for k, v in
                 dict(time_s=self.t, q_m3s=self.q, hw_level_m=self.hw, tw_level_m=self.tw,
-                     q_engine_m3s=self.q_swmm).items()}
+                     q_engine_m3s=self.q_engine).items()}
 
 
 def _region_stage(inlet, mean_bed):
@@ -123,6 +123,11 @@ class CulvertSet:
 
     def finalize(self):
         return None
+
+
+def _next_sample(rel_t, every):
+    """The next sampling time strictly after rel_t (no backlog after a long step)."""
+    return (math.floor(rel_t / every + 1e-9) + 1) * every
 
 
 def _safe(name):
@@ -215,7 +220,7 @@ class HeadwallCulvertCoupler(CulvertSet):
             self.applied_volume[i] += moved
         if t - self.t0 + 1e-9 >= self._next_record:
             self._record(t - self.t0, hw, tw)
-            self._next_record += self.record_every_s
+            self._next_record = _next_sample(t - self.t0, self.record_every_s)
 
     def _exchange(self, i, q, dt):
         """Move |q| dt from the losing end to the other; returns the signed volume moved."""
@@ -253,7 +258,7 @@ class HeadwallCulvertCoupler(CulvertSet):
             s.q.append(float(self.q_used[i]))
             s.hw.append(float(hw[i]))
             s.tw.append(float(tw[i]))
-            s.q_swmm.append(float(self.q_held[i]))
+            s.q_engine.append(float(self.q_held[i]))
 
     def finalize(self):
         """Close SWMM; returns {'swmm_routing_error_pct': float}."""
@@ -320,14 +325,14 @@ class BoydAsCodedCulverts(CulvertSet):
             self.t0 = t
         if t - self.t0 + 1e-9 < self._next_record:
             return
-        self._next_record += self.record_every_s
+        self._next_record = _next_sample(t - self.t0, self.record_every_s)
         for op, s in zip(self.ops, self.series):
             hw, tw = op.get_enquiry_stages()
             s.t.append(t - self.t0)
             s.q.append(float(op.discharge))
             s.hw.append(float(hw))
             s.tw.append(float(tw))
-            s.q_swmm.append(float(op.discharge))
+            s.q_engine.append(float(op.discharge))
 
 
 def _BoydRecorder(domain, culvert_set, label):
@@ -364,7 +369,7 @@ def attach_culverts(domain, culverts, engine=ENGINE_SWMM, *, workdir=None, **kwa
     """
     if engine == ENGINE_SWMM:
         if workdir is None:
-            workdir = os.path.join(getattr(domain, "datadir", ".") or ".", "culverts_swmm")
+            workdir = os.path.join(domain.get_datadir() or ".", "culverts_swmm")
         return HeadwallCulvertCoupler(domain, culverts, workdir, **kwargs)
     if engine == ENGINE_BOYD:
         return BoydAsCodedCulverts(domain, culverts, **kwargs)

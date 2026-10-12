@@ -88,7 +88,7 @@ class HeadwallCulvert:
             width_m=_num(d, "width_m"),
             height_m=_num(d, "height_m"),
             diameter_m=_num(d, "diameter_m"),
-            barrels=1 if barrels in (None, "") else int(barrels),
+            barrels=1 if barrels in (None, "") else int(float(barrels)),
             wall_thickness_m=_num(d, "wall_thickness_m", DEFAULT_WALL_THICKNESS_M),
             entrance_type=d.get("entrance_type") or catalogue.DEFAULT_ENTRANCE_TYPE,
             material=material,

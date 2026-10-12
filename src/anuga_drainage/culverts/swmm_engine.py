@@ -34,6 +34,7 @@ class SwmmHeadwallEngine:
             self._o_tw[i] = nodes[names.o_tw]
             self._j_hw[i] = nodes[names.j_hw]
             self._link[i] = links[names.conduit]
+        self.duration_s = int(duration_s)
         self.elapsed_s = 0
         self.closed = False
         self.routing_error_pct = None
@@ -46,6 +47,10 @@ class SwmmHeadwallEngine:
 
     def stride(self) -> None:
         """Advance SWMM by exactly one second."""
+        if self.elapsed_s >= self.duration_s:
+            raise RuntimeError(
+                f"SWMM reached its END_TIME ({self.duration_s} s): pass duration_s >= the "
+                f"ANUGA final time")
         next(self.sim)
         self.elapsed_s += 1
 

@@ -151,4 +151,19 @@ def test_headwall_volume_clipped_to_available(tmp_path):
 
 def test_headwall_boyd_engine_switch_runs(tmp_path):
     r = _flume(1, "boyd-as-coded", 30.0, tmp_path)
-    assert r["engine"] == "boyd-as-coded" and r["n_records"] >= 29
+    assert r["engine"] == "boyd-as-coded" and r["n_records"] >= 10
+    assert r["peak_q"] > 0.1 and r["v1"] - r["v0"] == pytest.approx(r["inflow"], rel=1e-9)
+
+
+def test_headwall_string_barrels_and_swmm_end_time_guard(tmp_path):
+    from anuga_drainage.culverts import SwmmHeadwallEngine
+    d = dict(flume.culvert_dict(), barrels="3.0")
+    c = HeadwallCulvert.from_dict(d)
+    assert c.barrels == 3
+    eng = SwmmHeadwallEngine([c], str(tmp_path), duration_s=3)
+    for _ in range(3):
+        eng.set_stages([0.5], [-0.1])
+        eng.stride()
+    with pytest.raises(RuntimeError, match="END_TIME"):
+        eng.stride()
+    eng.close()
