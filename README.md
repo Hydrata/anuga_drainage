@@ -35,6 +35,41 @@ pip install -e .[pipedream]   # + pipedream backend (from git; see note below)
 > has not merged. See [`CLAUDE.md`](CLAUDE.md) for this and other environment
 > constraints (notably that stock pyswmm 2.1 couples in whole-second steps).
 
+## Hydrata fork notes
+
+This is `Hydrata/anuga_drainage`, a fork of
+[`stoiver/anuga_drainage`](https://github.com/stoiver/anuga_drainage) (remote
+`upstream`). It is treated like Hydrata's `anuga_core` fork: prefer upstream,
+keep every change small and upstreamable, and PR fixes back.
+
+**Venv install (no conda).** Hydrata builds a plain Python 3.12 venv with the
+Hydrata `anuga_core` fork (4.x) installed from source, then this package
+editable:
+
+```bash
+python3.12 -m venv ~/hydrata/anuga_drainage-venv
+~/hydrata/anuga_drainage-venv/bin/pip install ~/hydrata/anuga_core        # meson build, a few minutes
+~/hydrata/anuga_drainage-venv/bin/pip install -e ".[swmm,test]"            # + [pipedream] optional
+~/hydrata/anuga_drainage-venv/bin/python -I -m pytest tests -q             # run from outside the tree
+```
+
+**pipedream is optional.** A plain `pip install .` pulls numpy and pandas only.
+The git (direct-reference) pipedream dependency sits behind the
+`[pipedream]` extra, and its tests skip when it is absent
+(`tests/test_dependency_hygiene.py` asserts this).
+
+**`julian` decision (licence check, 12-10-26).** `julian` (0.14) is not used by
+this package. It is a *declared but dead* dependency of `pyswmm` 2.2.0: no
+module in `pyswmm` or `swmm_toolkit` imports it (grep of the installed
+packages). Its PyPI metadata has no licence field, but the source repository
+(`dannyzed/julian`, `LICENSE.txt`) is **MIT, (c) 2016 Daniel Zawada**, which is
+compatible with this MIT package. Decision: **replaced by nothing, not
+vendored.** We accept the transitive MIT install as-is; if a licence scanner
+ever objects, install `pyswmm` with `--no-deps` (plus `swmm-toolkit`, `aenum`,
+`packaging`) and drop `julian` entirely.
+`tests/test_dependency_hygiene.py::test_pyswmm_runs_without_julian` proves a
+SWMM simulation runs with `import julian` blocked.
+
 ## Running an example
 
 Each example runs from its own directory (scripts use relative paths):
