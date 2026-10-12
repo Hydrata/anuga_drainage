@@ -87,7 +87,7 @@ def test_oracle_outlet_control_within_2pct(oracle_rows):
 @pytest.mark.xfail(strict=True, reason=(
     "D9 1D gate MEASURED FAILING for inlet control (12-10/13-10-26): SWMM 5.2.4's culvert "
     "code matches hds5.py exactly as a formula, but inside dynamic wave it is evaluated at a "
-    "reset upstream head and dropped once the barrel is full, so HW errors reach -50..+21 % "
+    "reset upstream head and dropped once the barrel is full, so HW errors reach -50..+29 % "
     "(cmp_mitered, cmbox_thinproj, all boxes unsubmerged, circles at HW/D 0.3 and >= 2.5). "
     "A result for the operator's design-1 / design-2 / C decision, NOT a bug to hide."))
 def test_oracle_inlet_control_within_2pct(oracle_rows):
