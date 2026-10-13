@@ -32,6 +32,20 @@ DUMMY_LENGTH_M = 1.0
 DUMMY_N = 0.010
 END_MARGIN_S = 2
 
+#: [OPTIONS] the entrance-energy engine needs (swmm_engine.py): the full convective term
+#: (SWMM's PARTIAL damping drops it as the Froude number nears 1) and a converged dynamic
+#: wave (with 8 trials / 0.0015 m the loss-free junction rings). extra_options still win.
+ENTRANCE_ENERGY_OPTIONS = {"INERTIAL_DAMPING": "NONE", "MAX_TRIALS": "30",
+                           "HEAD_TOLERANCE": "0.0001"}
+
+
+#: Kavg written under ``entrance_energy`` (Kentry = Kexit = 0). SWMM sets a link's hasLosses
+#: flag at input only when a coefficient is positive, and ignores losses set at run time
+#: (pyswmm inlet/outlet/average_head_loss: the reverse scheme, the steep switch) on a link
+#: without it: MEASURED, all-zero losses leave the reverse barrel at +26..+46 % in 42/42.
+#: 1e-6 contributes < 1e-6 of the barrel velocity head.
+HAS_LOSSES_KAVG = "0.000001"
+
 
 @dataclass
 class InpNames:
@@ -94,7 +108,7 @@ def dummy_size(culvert) -> tuple:
 def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
               report_step_s=3600, start=DEFAULT_START, title="anuga_drainage headwall culverts",
               extra_options=None, initial_stages=None, swmm_inlet_code=False,
-              dummy=None):
+              dummy=None, entrance_energy=False):
     """Write the .inp for ``culverts`` (HeadwallCulvert list) to ``path``.
 
     ``duration_s`` must cover the ANUGA run (SWMM stops at END_TIME).
@@ -106,6 +120,10 @@ def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
     control) instead of 0 (inlet control enforced by the coupler).
     ``dummy``: optional callable culvert -> (length_m, height_m, width_m) of the approach
     dummy conduit (default: DUMMY_LENGTH_M and :func:`dummy_size`).
+    ``entrance_energy``: write Kentry = Kexit = 0 and ENTRANCE_ENERGY_OPTIONS: the entrance
+    energy (1 + ke) v1^2/2g is imposed by the engine on the stage of the ENTERING end and
+    the exit velocity head is lost at the piezometric tailwater node (swmm_engine.py).
+    False writes the stock losses (Kentry ke, Kexit 1.0) and SWMM's default options.
     Returns an :class:`InpLayout` mapping culvert index -> SWMM names.
     """
     if routing_step <= 0 or routing_step > 1:
@@ -138,7 +156,8 @@ def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
         conduits.append(f"{n.conduit:<10} {n.j_hw:<10} {n.o_tw:<10} {c.length_m:.4f} {c.n:.4f} 0 0 0 0")
         xsections.append(f"{n.d_hw:<10} RECT_CLOSED {dh:.3f} {dw:.3f} 0 0 1")
         xsections.append(f"{n.conduit:<10} {shape} {g1:.5f} {g2:.5f} 0 0 {c.barrels} {e.swmm_code if swmm_inlet_code else 0}")
-        losses.append(f"{n.conduit:<10} {e.ke} 1.0 0 NO 0")
+        k_in, k_out, k_avg = (0.0, 0.0, HAS_LOSSES_KAVG) if entrance_energy else (e.ke, 1.0, 0)
+        losses.append(f"{n.conduit:<10} {k_in} {k_out} {k_avg} NO 0")
         (xi, yi), (xo, yo) = c.inlet_xy, c.outlet_xy
         ux, uy = c.outward_direction("inlet")
         coords.append(f"{n.o_hw:<10} {xi + ux * dl:.3f} {yi + uy * dl:.3f}")
@@ -159,7 +178,8 @@ def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
         f"REPORT_STEP {_hms(report_step_s)}",
         f"ROUTING_STEP {routing_step}",
         "VARIABLE_STEP 0",
-        *[f"{k} {v}" for k, v in (extra_options or {}).items()],
+        *[f"{k} {v}" for k, v in {**(ENTRANCE_ENERGY_OPTIONS if entrance_energy else {}),
+                                   **(extra_options or {})}.items()],
         "", "[JUNCTIONS]", ";;Name Elev MaxDepth InitDepth SurDepth Aponded", *junctions,
         "", "[OUTFALLS]", ";;Name Elev Type Stage Gated", *outfalls,
         "", "[CONDUITS]", ";;Name From To Length Roughness InOffset OutOffset InitFlow MaxFlow",

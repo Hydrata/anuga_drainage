@@ -26,7 +26,10 @@ from anuga_drainage.culverts.swmm_engine import ReverseBarrel, SwmmHeadwallEngin
 CASES = [(e, g) for g in u.GEOMETRIES for e in ENTRANCE_TYPES]
 
 
-def steady(e, geom, hw_d, tw_d, mode, strides=600):
+def steady(e, geom, hw_d, tw_d, mode, strides=600, ee=None):
+    """``ee`` (entrance energy, the shipped engine) defaults to on; the "off" control is SWMM
+    AS WRITTEN: stock losses and options too."""
+    ee = (mode != "off") if ee is None else ee
     L, S = u.GEOMETRIES[geom]
     c = u.culvert_for(e, L, S)
     control = InletControl([c])
@@ -35,7 +38,7 @@ def steady(e, geom, hw_d, tw_d, mode, strides=600):
     qs = []
     with tempfile.TemporaryDirectory() as d:
         eng = SwmmHeadwallEngine([c], d, duration_s=strides + 5, initial_stages=[(hw, tw)],
-                                 reverse_losses=mode)
+                                 reverse_losses=mode, entrance_energy=ee)
         for _ in range(strides):
             eng.set_stages([hw], [tw])
             eng.stride()
@@ -85,7 +88,8 @@ def test_reverse_drowned_exit_unchanged(key):
 @pytest.mark.parametrize("hw_d,tw_d", [(1.5, 0.0), (2.0, 1.8)])
 def test_forward_flow_bit_identical(hw_d, tw_d):
     e = [t for t in ENTRANCE_TYPES if t.hds5 == "box_wing45_bev"][0]
-    assert steady(e, "20m_S2", hw_d, tw_d, "hds5")[0] == steady(e, "20m_S2", hw_d, tw_d, "off")[0]
+    assert (steady(e, "20m_S2", hw_d, tw_d, "hds5", ee=True)[0]
+            == steady(e, "20m_S2", hw_d, tw_d, "off", ee=True)[0])
 
 
 class _Link:

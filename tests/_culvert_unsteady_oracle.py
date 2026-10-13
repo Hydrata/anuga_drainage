@@ -44,6 +44,7 @@ from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _culvert_oracle as oracle  # noqa: E402
 import _hds5_oracle as hds5  # noqa: E402
 
 from anuga_drainage.culverts import ENTRANCE_TYPES, MATERIAL_MANNING_N, HeadwallCulvert  # noqa: E402
@@ -181,7 +182,37 @@ def flips(x, thr):
     return int(np.sum(s[1:] != s[:-1]))
 
 
-def score_band(t, q, qref, vref, plateaus, segments=None, hw=None, rise=D, regime=None):
+def step_window_mask(fwd, hw, tw, q_qs):
+    """Instants (over the series) whose imposed headwater lies strictly inside a
+    bisection-confirmed step of the HDS-5 reference's HW(Q) at a free outlet (TW at the invert,
+    the only tailwater where the critical-slope step sits: a steep barrel with a free outlet is
+    inlet control by definition, a mild one is outlet control, and the two forms disagree by
+    up to 5.6 % of HW at the critical slope). Q(HW) is continuous but FLAT across the step, so
+    inside it the reference Q is a property of the method's regime switch, not of the
+    culvert. Scored against the converged march. Returns (mask, [(hw_below, hw_above, q_step)]).
+    Forward flow only (the reverse reference has no step: T4 sweep)."""
+    wins = oracle.hw_step_windows(fwd)
+    free = np.asarray(tw) <= 1e-9
+    forward = np.asarray(q_qs) > 0.0
+    mask = np.zeros(len(hw), dtype=bool)
+    for lo, hi, _q in wins:
+        mask |= free & forward & (np.asarray(hw) > lo) & (np.asarray(hw) < hi)
+    return mask, wins
+
+
+def runs(t, mask):
+    """[[t_first, t_last], ...] of the contiguous (1 s) runs of True in ``mask``."""
+    out = []
+    for k in np.flatnonzero(mask):
+        if out and t[k] - out[-1][1] <= 1.0:
+            out[-1][1] = float(t[k])
+        else:
+            out.append([float(t[k]), float(t[k])])
+    return out
+
+
+def score_band(t, q, qref, vref, plateaus, segments=None, hw=None, rise=D, regime=None,
+               step_window=None):
     """The per-instant band, plateau and chatter metrics for one recorded series.
 
     ``t`` (s, may have gaps), ``q`` the culvert flow under test, ``qref`` / ``vref`` the
@@ -200,13 +231,20 @@ def score_band(t, q, qref, vref, plateaus, segments=None, hw=None, rise=D, regim
     for k in crossings:
         excl |= np.abs(t - t[k]) <= EXCLUDE_S
     ratio = err / tol
-    scored = ~excl
+    # reference-step windows (D20): REPORTED and excluded from the forward band like the
+    # fill/unfill crossing; the count is asserted by the suite, the list is committed
+    step = np.zeros(q.shape, dtype=bool) if step_window is None else np.asarray(step_window, bool)
+    scored = ~excl & ~step
     res = dict(
         n=int(scored.sum()), violations=int(((ratio > 1) & scored).sum()),
         worst_ratio=float(ratio[scored].max()), worst_t=float(t[scored][np.argmax(ratio[scored])]),
         excluded=int(excl.sum()), excluded_violations=int(((ratio > 1) & excl).sum()),
         excluded_max_ratio=float(ratio[excl].max()) if excl.any() else 0.0,
-        crossings=[float(t[k]) for k in crossings])
+        crossings=[float(t[k]) for k in crossings],
+        step_excluded=int((step & ~excl).sum()),
+        step_excluded_violations=int(((ratio > 1) & step & ~excl).sum()),
+        step_excluded_runs=runs(t, step & ~excl),
+        violation_runs=runs(t, (ratio > 1) & scored))
     if regime is not None:                    # which HDS-5 regime the violating instants are in
         counts = {}
         for r_, bad_ in zip(regime, (ratio > 1) & scored):
@@ -242,10 +280,10 @@ def score_band(t, q, qref, vref, plateaus, segments=None, hw=None, rise=D, regim
     return res
 
 
-def score(t, hw, tw, q, qref, vref, regime, flag):          # t, q, flag: 1..T_END; rest 0..T_END
+def score(t, hw, tw, q, qref, vref, regime, flag, step_window=None):  # t, q, flag: 1..T_END; rest 0..T_END
     """Band metrics for one 1D case (see :func:`score_band`) plus control/regime tallies."""
     res = score_band(t, q, qref[1:], vref[1:], PLATEAUS, {**SEGMENTS, **E_SPLIT}, hw[1:],
-                     regime=regime[1:])
+                     regime=regime[1:], step_window=step_window)
     res["controls"] = {CONTROL_NAMES[k]: int((flag == k).sum()) for k in (BARREL, 1, 2)}
     res["regimes"] = sorted(set(regime.tolist()))
     return res
@@ -260,7 +298,10 @@ def run_case(args):
     qs = QuasiSteady(e, L, S)
     qref, _column = inertia_aware_reference(qs.fwd, qs.rev, L, S, qs.area_full, D, t, hw, tw, q_qs)
     q, raw, flag = run_coupler(e, L, S, hw, tw)
-    res = score(t[1:], hw, tw, q, qref, vref, regime, flag)
+    step, windows = step_window_mask(qs.fwd, hw, tw, q_qs)
+    res = score(t[1:], hw, tw, q, qref, vref, regime, flag, step_window=step[1:])
+    res["step_windows"] = [dict(hw_below_m=round(a, 4), hw_above_m=round(b, 4), q_step=round(q_, 5))
+                           for a, b, q_ in windows]
     segments = {**SEGMENTS, **E_SPLIT}
     # negative controls: the quasi-steady reference everywhere, and a column with L/(gA) x2, x0.5
     controls = {"quasi_steady": q_qs}

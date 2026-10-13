@@ -51,6 +51,12 @@ def unsteady(results_dir):
                             CONTROL_NAMES[int(s["flag"][k])], s["regime"][k], f"{s['q_ref'][k]:.6f}"])
     with open(results_dir / "unsteady-summary.json", "w") as f:
         json.dump([res for res, _ in out], f, indent=1)
+    # D20: the reference-step windows' excluded instants, per case (the committed list)
+    with open(results_dir / "step-window-excluded.json", "w") as f:
+        json.dump({res["case"]: dict(windows=res["step_windows"], excluded=res["step_excluded"],
+                                     would_violate=res["step_excluded_violations"],
+                                     runs=res["step_excluded_runs"])
+                   for res, _ in out if res["step_windows"]}, f, indent=1)
     return [res for res, _ in out]
 
 
@@ -115,6 +121,53 @@ def test_unsteady_plateaus_within_2pct(unsteady):
     assert bad == [], f"{len(bad)} plateaus outside 2 %:\n" + "\n".join(bad)
 
 
+def test_unsteady_forward_plateaus_within_1p1pct(unsteady):
+    """The 168 forward plateaus (A, C, D1, D2 x 42) are within 1.1 % (MEASURED max 1.06 %)."""
+    errs = [(abs(p["err_pct"]), f"{r['case']} {name}") for r in unsteady
+            for name, p in r["plateaus"].items() if name != "E"]
+    assert len(errs) == 168
+    assert max(errs)[0] <= 1.1, max(errs)
+
+
+#: D20: instants excluded because the imposed HW lies inside a bisection-confirmed step of the
+#: HDS-5 reference's HW(Q) (free outlet, converged march; _culvert_unsteady_oracle.
+#: step_window_mask). Deterministic (reference + stage series only), asserted at its measured
+#: value so the exclusion cannot grow. The per-case runs are committed in
+#: results/step-window-excluded.json; 144 of the 395 would violate (reported, not hidden).
+STEP_WINDOW_EXCLUDED = {
+    "cmp_hw@20m_S2": 76, "cmp_mitered@20m_S2": 47, "cmp_proj@20m_S2": 86,
+    "rcp_sq_hw@20m_S0.5": 71, "rcp_groove_hw@20m_S0.5": 50, "rcp_groove_proj@20m_S0.5": 26,
+    "circ_bevel45@20m_S0.5": 39}
+
+
+def test_unsteady_reference_step_window_exclusions_are_asserted(unsteady):
+    got = {r["case"]: r["step_excluded"] for r in unsteady if r["step_excluded"]}
+    assert got == STEP_WINDOW_EXCLUDED
+    assert sum(got.values()) == 395
+    assert sum(r["step_excluded_violations"] for r in unsteady) == 144
+    # only a free-outlet forward step excludes: every excluded run sits in segments A-C
+    for r in unsteady:
+        assert all(hi <= 3240 for _lo, hi in r["step_excluded_runs"]), r["case"]
+    # the fill/unfill exclusion is the step's own 1 s footprint and hides no violation
+    assert sum(r["excluded"] for r in unsteady) == 348
+    assert sum(r["excluded_violations"] for r in unsteady) == 0
+
+
+def test_unsteady_outlet_partial_instants_at_most_300(unsteady):
+    """Violating instants in the HDS-5 outlet-partial regime, all 42 cases (stock engine:
+    7675). MEASURED 160."""
+    n = sum(r["violations_by_regime"].get("outlet-partial", 0) for r in unsteady)
+    assert n <= 300, n
+
+
+def test_unsteady_no_violation_while_the_barrel_is_a_drowned_column(unsteady):
+    """3874-4461 s (both ends drowned: the reversal ramp and the TW-to-crown hand-over): no
+    violating instant in any of the 42 cases (the stock 4141-4142 s instants vanish)."""
+    def inside(r, a=3874, b=4461):
+        return sum(max(0, min(hi, b) - max(lo, a) + 1) for lo, hi in r["violation_runs"])
+    assert [(r["case"], inside(r)) for r in unsteady if inside(r)] == []
+
+
 def test_unsteady_no_chatter_excess(unsteady):
     bad = [f"{r['case']}: {r['chatter_excess']}" for r in unsteady if r["chatter_excess"] > 5]
     assert bad == []
@@ -169,6 +222,48 @@ def test_coupler_per_stride_overhead_at_most_2us(results_dir):
     with open(results_dir / "stride-overhead.json", "w") as f:
         json.dump(measured, f, indent=1)
     assert caps_us <= 5.0, f"caps {caps_us:.2f} us"
+
+
+def test_engine_whole_step_cost_recorded(results_dir):
+    """D22: the WHOLE engine step per culvert (set_stages + stride: the entrance-energy / reverse
+    state machine AND SWMM's own second) forward and reverse, recorded in stride-overhead.json.
+    A recorded number, NOT a gate (the real cost check is TASK-3634 on Towradgi); only sanity
+    bounds so a pathological regression cannot hide."""
+    import tempfile
+
+    from anuga_drainage.culverts import SwmmHeadwallEngine
+    e = [t for t in ENTRANCE_TYPES if t.hds5 == "rcp_sq_hw"][0]
+    c = u.culvert_for(e, 20.0, 0.02)
+    measured = {}
+    for name, hw_d, tw_d in (("forward", 1.0, 0.0), ("reverse", 0.5, 2.0)):
+        hw, tw = c.upstream_invert_m + hw_d * u.D, c.downstream_invert_m + tw_d * u.D
+        with tempfile.TemporaryDirectory() as d:
+            eng = SwmmHeadwallEngine([c], d, duration_s=4000, initial_stages=[(hw, tw)])
+            for _ in range(300):                     # settle
+                eng.set_stages([hw], [tw])
+                eng.stride()
+            best_set, best_all = float("inf"), float("inf")
+            for _ in range(5):
+                t_set = t_all = 0.0
+                for _ in range(500):
+                    t0 = time.perf_counter()
+                    eng.set_stages([hw], [tw])
+                    t1 = time.perf_counter()
+                    eng.stride()
+                    t2 = time.perf_counter()
+                    t_set += t1 - t0
+                    t_all += t2 - t0
+                best_set, best_all = min(best_set, t_set / 500), min(best_all, t_all / 500)
+            assert (eng.flows()[0] < 0) == (name == "reverse")
+            eng.close()
+        measured[f"engine_set_stages_us_{name}"] = best_set * 1e6
+        measured[f"engine_set_stages_plus_stride_us_{name}"] = best_all * 1e6
+    path = results_dir / "stride-overhead.json"
+    data = json.load(open(path)) if path.exists() else {}
+    data.update(measured)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=1)
+    assert all(v < 5000.0 for v in measured.values()), measured    # sanity only: < 5 ms
 
 
 # ---------------------------------------------------------------- 2D flume (AC5)

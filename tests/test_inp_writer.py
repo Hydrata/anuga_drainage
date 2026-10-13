@@ -86,3 +86,37 @@ def test_inp_writer_rejects_invalid_entrance_for_shape():
         _culvert(shape="circular", entrance="wingwalls_0")
     with pytest.raises(ValueError, match="not valid for a box corrugated_metal"):
         _culvert(material="corrugated_metal", entrance="wingwalls_0")
+
+
+def test_stock_inp_byte_identical_to_18238c1(tmp_path):
+    """entrance_energy=False writes the stock .inp BYTE-FOR-BYTE as at 18238c1 (golden
+    file written by that commit's write_inp). The approach dummy is the one TASK-3677 T5
+    widened, so the golden is compared through the ``dummy`` hook at the old size."""
+    from anuga_drainage.culverts.inp_writer import DUMMY_LENGTH_M
+
+    def old_dummy(c):
+        return DUMMY_LENGTH_M, max(6.0, 5.0 * c.rise_m), max(10.0, 2.0 * c.footprint_width_m)
+
+    cs = [_culvert(barrels=2), _culvert(shape="circular", entrance="projecting",
+                                        material="corrugated_metal")]
+    cs[1].name = "c0"
+    cs = [cs[0], cs[1]]
+    out = tmp_path / "stock.inp"
+    write_inp(cs, str(out), duration_s=3600, initial_stages=[(5.5, 4.8), (5.2, 4.9)],
+              dummy=old_dummy, entrance_energy=False)
+    golden = os.path.join(os.path.dirname(__file__), "data", "stock_18238c1.inp")
+    assert out.read_bytes() == open(golden, "rb").read()
+
+
+def test_entrance_energy_inp_options_and_losses(tmp_path):
+    out = tmp_path / "ee.inp"
+    write_inp([_culvert()], str(out), duration_s=3600, entrance_energy=True)
+    text = out.read_text()
+    assert "INERTIAL_DAMPING NONE" in text and "MAX_TRIALS 30" in text
+    assert "HEAD_TOLERANCE 0.0001" in text
+    assert "CUL0       0.0 0.0 0.000001 NO 0" in text    # Kavg > 0: hasLosses stays TRUE
+    # explicit extra_options still win
+    write_inp([_culvert()], str(out), duration_s=3600, entrance_energy=True,
+              extra_options={"INERTIAL_DAMPING": "PARTIAL"})
+    text = out.read_text()
+    assert "INERTIAL_DAMPING PARTIAL" in text and "INERTIAL_DAMPING NONE" not in text

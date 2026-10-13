@@ -111,6 +111,74 @@ def test_oracle_inlet_control_within_2pct(oracle_rows):
     assert bad == []
 
 
+# ---------------------------------------------------------------- entrance energy (T1)
+#: rough, mildly sloped, partly full barrels (HDS-5 outlet-partial): cmp_hw on the 8 m flume
+#: (S 1.25 %) at HW/D 0.435 / 0.57 / 0.84 / 0.975 and on 20 m S 0.5 % at HW/D 0.5 / 0.9
+OUTLET_PARTIAL_POINTS = [(8.0, 0.0125, hw) for hw in (0.3915, 0.513, 0.756, 0.8775)] + \
+    [(20.0, 0.005, hw) for hw in (0.45, 0.81)]
+
+
+def _outlet_partial_errors(**engine_kw):
+    import functools
+
+    from anuga_drainage.culverts import rating, swmm_engine
+    e = [t for t in ENTRANCE_TYPES if t.hds5 == "cmp_hw"][0]
+    errs = []
+    orig = rating.SwmmHeadwallEngine
+    rating.SwmmHeadwallEngine = functools.partial(swmm_engine.SwmmHeadwallEngine, **engine_kw)
+    try:
+        for L, S, hw in OUTLET_PARTIAL_POINTS:
+            c = oracle.culvert_for(e, L, S)
+            ref = oracle.hds5.Culvert("circ", oracle.D, L=L, S=S, n=c.n, inlet="cmp_hw")
+            assert ref.hw(ref.q(hw, 0.0), 0.0, detail=True)[3] == "outlet-partial"
+            (q, _), = steady_flows(c, [(oracle.INV + hw, c.downstream_invert_m)])
+            errs.append(100.0 * (q / ref.q(hw, 0.0) - 1.0))
+    finally:
+        rating.SwmmHeadwallEngine = orig
+    return errs
+
+
+def test_entrance_energy_outlet_partial_within_1pct():
+    """The pond-to-barrel entrance energy (swmm_engine.EntranceEnergy) puts SWMM's partly-full
+    barrel on the HDS-5 backwater (gvf) flow: MEASURED -0.6..+0.4 %."""
+    errs = _outlet_partial_errors()
+    assert max(abs(x) for x in errs) <= 1.0, errs
+
+
+def test_entrance_energy_negative_control_stock_losses_over_deliver():
+    """NEGATIVE CONTROL: the stock engine (pond stage on a piezometric junction, Kentry ke,
+    Kexit 1.0, PARTIAL damping) over-delivers in the same points (MEASURED +3.4..+26 %),
+    so the gate above can fail."""
+    errs = _outlet_partial_errors(entrance_energy=False)
+    assert min(errs) > 3.0, errs
+
+
+def test_inlet_gate_point_cmp_hw_1p2_needs_the_entrance_energy():
+    """The one inlet point decided by the reference step (cmp_hw, L 20 m, S 2 %, HW/D 1.2, free
+    outlet), scored against the converged march: the entrance-energy engine passes (in Q space,
+    about -0.2 %), the stock engine (entrance_energy=False: 1.2434 m3/s, +2.26 % in Q) FAILS,
+    so the converged-march rule does not green the stock engine."""
+    import functools
+
+    from anuga_drainage.culverts import rating, swmm_engine
+    e = [t for t in ENTRANCE_TYPES if t.hds5 == "cmp_hw"][0]
+    c = oracle.culvert_for(e, 20.0, 0.02)
+    ref = oracle.reference_for(e, 20.0, 0.02)
+    hw = 1.2 * oracle.D
+    stages = [(oracle.INV + hw, c.downstream_invert_m)]
+    (q_ee, _), = steady_flows(c, stages)
+    orig = rating.SwmmHeadwallEngine
+    rating.SwmmHeadwallEngine = functools.partial(swmm_engine.SwmmHeadwallEngine,
+                                                  entrance_energy=False)
+    try:
+        (q_stock, _), = steady_flows(c, stages)
+    finally:
+        rating.SwmmHeadwallEngine = orig
+    s_ee, s_stock = oracle.score_point(ref, q_ee, hw, 0.0), oracle.score_point(ref, q_stock, hw, 0.0)
+    assert s_ee["pass_2pct"] and s_ee["score_space"] == "q" and abs(s_ee["err_q_pct"]) < 0.5, s_ee
+    assert not s_stock["pass_2pct"] and s_stock["err_pct"] > 4.0, s_stock
+
+
 # ---------------------------------------------------------------- ANUGA runs
 def _flume(mode, engine, final_time, tmp_path):
     out = tmp_path / f"flume_{mode}_{engine}.json"

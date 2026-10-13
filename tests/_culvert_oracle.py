@@ -72,11 +72,12 @@ def hw_jump(ref, q, tw, tol_m, window=JUMP_WINDOW, n=41):
         return _hw_jump(ref, q, tw, tol_m, window, n)
 
 
-def _hw_jump(ref, q, tw, tol_m, window, n):
-    qs = [q * (1 - window + 2 * window * k / (n - 1)) for k in range(n)]
+def _steps(ref, qs, tw, tol_m):
+    """Every bisection-confirmed step (q_step, hw_below, hw_above) of the reference's HW(Q)
+    between consecutive flows of ``qs`` (jump > ``tol_m`` that survives dQ/Q < 1e-9)."""
     hws = [ref.hw(x, tw) for x in qs]
-    worst = 0.0
-    for k in range(n - 1):
+    out = []
+    for k in range(len(qs) - 1):
         lo, hi, hlo, hhi = qs[k], qs[k + 1], hws[k], hws[k + 1]
         if abs(hhi - hlo) <= tol_m:
             continue
@@ -88,8 +89,32 @@ def _hw_jump(ref, q, tw, tol_m, window, n):
             else:
                 lo, hlo = mid, hm
         if abs(hhi - hlo) > tol_m:
-            worst = max(worst, abs(hhi - hlo))
-    return worst
+            out.append((0.5 * (lo + hi), hlo, hhi))
+    return out
+
+
+def _hw_jump(ref, q, tw, tol_m, window, n):
+    qs = [q * (1 - window + 2 * window * k / (n - 1)) for k in range(n)]
+    return max((abs(hhi - hlo) for _q, hlo, hhi in _steps(ref, qs, tw, tol_m)), default=0.0)
+
+
+def hw_step_windows(ref, tw=0.0, q_lo=0.02, q_hi=4.5, n=240, tol_frac=GATE_PCT / 100.0):
+    """The HW intervals (hw_below, hw_above, m above the invert) over which the reference's
+    Q(HW) is FLAT at tailwater depth ``tw``: bisection-confirmed steps of HW(Q) larger than
+    ``tol_frac`` of the HW (the same size rule as the steady ``hw_jump``), found by a scan of
+    ``n`` geometric flows in [q_lo, q_hi] against the converged march. Within such a window the
+    reference HW is a function of the method's regime switch, not of the culvert."""
+    qs = [q_lo * (q_hi / q_lo) ** (k / (n - 1)) for k in range(n)]
+    with converged_march():
+        hws = [ref.hw(x, tw) for x in qs]
+        wins = []
+        for k in range(n - 1):
+            tol = tol_frac * max(hws[k], hws[k + 1])
+            if abs(hws[k + 1] - hws[k]) <= tol:
+                continue
+            for q_step, hlo, hhi in _steps(ref, qs[k:k + 2], tw, tol):
+                wins.append((min(hlo, hhi), max(hlo, hhi), q_step))
+    return wins
 
 
 def score_point(ref, q, hw, tw):
