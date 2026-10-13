@@ -79,13 +79,22 @@ def dummy_size(culvert) -> tuple:
     because its plan area is a storage tank between the 2D headwater and the
     culvert. MEASURED on the flume: a 5 m long 6 m x 10 m dummy raised the 2D
     peak headwater by 34 mm; the same section 1 m long, by 1.3 mm.
+
+    WIDE (TASK-3672 T5): the dummy's inertia (L / g w y) and J_HW's storage (half the
+    plan areas of the dummy and the barrel) form an undamped oscillator (period
+    2 pi sqrt(L A_s / g w y): 4.7 s predicted and measured at HW/D 0.4 on a 1.5 m box);
+    with a 10 m wide dummy J_HW swings up to +-166 mm about the imposed headwater on
+    steep barrels while inlet control caps the flow (the swing is hidden by the cap, and
+    SWMM reports convergence). 60 m wide cuts it to 14 mm with every steady and plateau
+    flow within 0.07 % (42 unsteady cases and the 197-point steady grid, MEASURED).
     """
-    return max(6.0, 5.0 * culvert.rise_m), max(10.0, 2.0 * culvert.footprint_width_m)
+    return max(6.0, 5.0 * culvert.rise_m), max(60.0, 12.0 * culvert.footprint_width_m)
 
 
 def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
               report_step_s=3600, start=DEFAULT_START, title="anuga_drainage headwall culverts",
-              extra_options=None, initial_stages=None, swmm_inlet_code=False):
+              extra_options=None, initial_stages=None, swmm_inlet_code=False,
+              dummy=None):
     """Write the .inp for ``culverts`` (HeadwallCulvert list) to ``path``.
 
     ``duration_s`` must cover the ANUGA run (SWMM stops at END_TIME).
@@ -95,6 +104,8 @@ def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
     create barrel storage out of nothing (a SWMM continuity artefact).
     ``swmm_inlet_code``: write the entrance's SWMM culvert code (SWMM-native inlet
     control) instead of 0 (inlet control enforced by the coupler).
+    ``dummy``: optional callable culvert -> (length_m, height_m, width_m) of the approach
+    dummy conduit (default: DUMMY_LENGTH_M and :func:`dummy_size`).
     Returns an :class:`InpLayout` mapping culvert index -> SWMM names.
     """
     if routing_step <= 0 or routing_step > 1:
@@ -109,7 +120,10 @@ def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
             continue
         n = InpNames(i)
         layout.names[i] = n
-        dh, dw = dummy_size(c)
+        if dummy is None:
+            dl, (dh, dw) = DUMMY_LENGTH_M, dummy_size(c)
+        else:
+            dl, dh, dw = dummy(c)
         shape, g1, g2 = c.effective_geometry
         e = c.entrance
         hw0, tw0 = c.upstream_invert_m, c.downstream_invert_m
@@ -120,14 +134,14 @@ def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
         junctions.append(f"{n.j_hw:<10} {c.upstream_invert_m:.4f} {dh:.3f} {y0:.4f} 1000 0")
         outfalls.append(f"{n.o_hw:<10} {c.upstream_invert_m:.4f} FIXED {hw0:.4f} NO")
         outfalls.append(f"{n.o_tw:<10} {c.downstream_invert_m:.4f} FIXED {tw0:.4f} NO")
-        conduits.append(f"{n.d_hw:<10} {n.j_hw:<10} {n.o_hw:<10} {DUMMY_LENGTH_M:.2f} {DUMMY_N} 0 0 0 0")
+        conduits.append(f"{n.d_hw:<10} {n.j_hw:<10} {n.o_hw:<10} {dl:.2f} {DUMMY_N} 0 0 0 0")
         conduits.append(f"{n.conduit:<10} {n.j_hw:<10} {n.o_tw:<10} {c.length_m:.4f} {c.n:.4f} 0 0 0 0")
         xsections.append(f"{n.d_hw:<10} RECT_CLOSED {dh:.3f} {dw:.3f} 0 0 1")
         xsections.append(f"{n.conduit:<10} {shape} {g1:.5f} {g2:.5f} 0 0 {c.barrels} {e.swmm_code if swmm_inlet_code else 0}")
         losses.append(f"{n.conduit:<10} {e.ke} 1.0 0 NO 0")
         (xi, yi), (xo, yo) = c.inlet_xy, c.outlet_xy
         ux, uy = c.outward_direction("inlet")
-        coords.append(f"{n.o_hw:<10} {xi + ux * DUMMY_LENGTH_M:.3f} {yi + uy * DUMMY_LENGTH_M:.3f}")
+        coords.append(f"{n.o_hw:<10} {xi + ux * dl:.3f} {yi + uy * dl:.3f}")
         coords.append(f"{n.j_hw:<10} {xi:.3f} {yi:.3f}")
         coords.append(f"{n.o_tw:<10} {xo:.3f} {yo:.3f}")
     if not layout.names:

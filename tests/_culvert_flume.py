@@ -20,7 +20,13 @@ series (with its per-sample control flag) is written with ``CulvertSet.write_csv
 """
 import argparse
 import json
+import os
+import sys
 import tempfile
+
+# -I drops PYTHONPATH: import the anuga_drainage of THIS checkout (not whatever the venv
+# has installed), so a scratch copy tests its own code.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "src"))
 
 DEFAULT_DIAMETER = 0.9
 

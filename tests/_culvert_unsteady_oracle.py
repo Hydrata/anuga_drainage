@@ -252,6 +252,6 @@ def run_case(args):
 
 def run_all(workers=None):
     jobs = [(i, g) for g in GEOMETRIES for i in range(len(ENTRANCE_TYPES))]
-    workers = workers or min(16, os.cpu_count() or 1)
+    workers = workers or int(os.environ.get("CULVERT_UNSTEADY_WORKERS", 0)) or min(16, os.cpu_count() or 1)
     with ProcessPoolExecutor(max_workers=workers) as ex:
         return list(ex.map(run_case, jobs))
