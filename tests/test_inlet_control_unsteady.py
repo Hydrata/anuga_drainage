@@ -1,0 +1,209 @@
+"""TASK-3672 AC3, AC5, AC6: coupler-enforced HDS-5 inlet control through rise-fall-rise,
+the inlet -> outlet handoff and reverse flow.
+
+1D: 14 catalogue entrances x {20 m S 2 %, 20 m S 0.5 %, flume 8 m} = 42 series of 4800 s
+(see _culvert_unsteady_oracle.py for the series and the band). 2D: the flume driven by an
+inflow CSV and a Time_boundary tailwater (see _culvert_flume_unsteady.py), SWMM engine on the
+0.9 m pipe (the AC) and on a 0.6 m pipe (positive control), Boyd as coded on the 0.6 m pipe
+(the must-fail negative control).
+
+Results (per-case CSVs, unsteady-summary.json, flume series + summary) go to ``--results-dir``.
+"""
+import csv
+import json
+import os
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import numpy as np
+import pytest
+
+pytest.importorskip("pyswmm")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+import _culvert_flume_unsteady as fu  # noqa: E402
+import _culvert_unsteady_oracle as u  # noqa: E402
+
+from anuga_drainage.culverts import (  # noqa: E402
+    CONTROL_NAMES, ENTRANCE_TYPES, HeadwallCulvertCoupler, InletControl)
+
+CASES = len(ENTRANCE_TYPES) * len(u.GEOMETRIES)
+
+
+# ---------------------------------------------------------------- 1D series (AC3)
+@pytest.fixture(scope="module")
+def unsteady(results_dir):
+    out = u.run_all()
+    folder = results_dir / "unsteady-1d"
+    folder.mkdir(exist_ok=True)
+    for res, s in out:
+        name = res["case"].replace("@", "_")
+        with open(folder / f"{name}.csv", "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["t_s", "hw_m", "tw_m", "q_m3s", "q_swmm_m3s", "q_hds5_m3s", "control",
+                        "regime_hds5"])
+            for k in range(len(s["t"])):
+                w.writerow([int(s["t"][k]), f"{s['hw'][k]:.5f}", f"{s['tw'][k]:.5f}",
+                            f"{s['q'][k]:.6f}", f"{s['q_raw'][k]:.6f}", f"{s['q_ref'][k]:.6f}",
+                            CONTROL_NAMES[int(s["flag"][k])], s["regime"][k]])
+    with open(results_dir / "unsteady-summary.json", "w") as f:
+        json.dump([res for res, _ in out], f, indent=1)
+    return [res for res, _ in out]
+
+
+def _fail_lines(results, pick):
+    return [f"{r['case']}: {pick(r)}" for r in results]
+
+
+def test_unsteady_runs_all_42_cases(unsteady):
+    assert len(unsteady) == CASES == 42
+    assert {r["geometry"] for r in unsteady} == set(u.GEOMETRIES)
+    assert len({r["hds5"] for r in unsteady}) == 14
+
+
+@pytest.mark.parametrize("segment", ["A", "B", "C", "D"])
+def test_unsteady_forward_segment_inside_band(unsteady, segment):
+    """Rise (part-full -> full), fall, rise again, inlet -> outlet handoff: every instant."""
+    bad = [f"{r['case']}: {r['segments'][segment]['violations']} instants, worst "
+           f"{r['segments'][segment]['worst_ratio']:.2f}x tol"
+           for r in unsteady if r["segments"][segment]["violations"]]
+    assert bad == [], f"{len(bad)}/42 cases outside the band in segment {segment}:\n" + "\n".join(bad)
+
+
+def test_unsteady_reverse_segment_inside_band(unsteady):
+    """Segment E: HW 2.0 D -> 0.5 D, TW 1.8 D -> 2.0 D, mirrored oracle."""
+    bad = [f"{r['case']}: {r['segments']['E']['violations']} instants, worst "
+           f"{r['segments']['E']['worst_ratio']:.2f}x tol"
+           for r in unsteady if r["segments"]["E"]["violations"]]
+    assert bad == [], f"{len(bad)}/42 cases outside the band in segment E:\n" + "\n".join(bad)
+
+
+def test_unsteady_plateaus_within_2pct(unsteady):
+    bad = [f"{r['case']} {name}: {p['err_pct']:+.2f} %" for r in unsteady
+           for name, p in r["plateaus"].items() if abs(p["err_pct"]) > 2.0]
+    assert bad == [], f"{len(bad)} plateaus outside 2 %:\n" + "\n".join(bad)
+
+
+def test_unsteady_no_chatter_excess(unsteady):
+    bad = [f"{r['case']}: {r['chatter_excess']}" for r in unsteady if r["chatter_excess"] > 5]
+    assert bad == []
+
+
+def test_unsteady_exactly_one_reversal(unsteady):
+    assert [r["case"] for r in unsteady if r["reversals"] != 1] == []
+
+
+def test_unsteady_control_flags_cover_inlet_and_barrel(unsteady):
+    """The per-sample control flag is live: on the steep geometries (S 2 %, flume) inlet control
+    caps SWMM's barrel somewhere in every case and the barrel governs somewhere in every case."""
+    for r in unsteady:
+        assert r["controls"]["barrel"] > 0, r["case"]
+        if r["geometry"] != "20m_S0.5":
+            assert r["controls"]["inlet"] > 0, r["case"]
+
+
+# ---------------------------------------------------------------- per-stride overhead (AC6)
+def test_coupler_per_stride_overhead_at_most_2us(results_dir):
+    """The coupler's whole per-stride cost of inlet control (HeadwallCulvertCoupler._accumulate:
+    raw + capped accumulation and the control flag), one culvert, best of 7 x 20000 strides."""
+    e = [t for t in ENTRANCE_TYPES if t.hds5 == "rcp_sq_hw"][0]
+    c = u.culvert_for(e, 20.0, 0.02)
+
+    class Stub:
+        inlet_control = InletControl([c])
+        control = None
+        _accumulate = HeadwallCulvertCoupler._accumulate
+
+    stub = Stub()
+    hw, tw = [c.upstream_invert_m + 1.0], [c.downstream_invert_m]
+    cap_f, cap_r = stub.inlet_control.caps(hw, tw)
+    n = 20000
+    measured = {}
+    for flow in (1.0, 5.0, -0.5):                    # barrel, inlet-capped, reverse
+        raw = np.array([flow])
+        best = float("inf")
+        for _ in range(7):
+            q_acc, raw_acc = [0.0], np.zeros(1)
+            t0 = time.perf_counter()
+            for _ in range(n):
+                stub._accumulate(raw, cap_f, cap_r, q_acc, raw_acc)
+            best = min(best, (time.perf_counter() - t0) / n)
+        measured[f"stride_us_flow_{flow}"] = best * 1e6
+        assert best <= 2e-6, f"flow {flow}: {best * 1e6:.2f} us per stride"
+    t0 = time.perf_counter()
+    for _ in range(2000):
+        stub.inlet_control.caps(hw, tw)
+    caps_us = (time.perf_counter() - t0) / 2000 * 1e6      # once per ANUGA step that strides
+    measured["caps_us_per_stepping_step"] = caps_us
+    with open(results_dir / "stride-overhead.json", "w") as f:
+        json.dump(measured, f, indent=1)
+    assert caps_us <= 5.0, f"caps {caps_us:.2f} us"
+
+
+# ---------------------------------------------------------------- 2D flume (AC5)
+@pytest.fixture(scope="module")
+def flume(tmp_path_factory, results_dir):
+    base = tmp_path_factory.mktemp("flume-unsteady")
+    jobs = {"swmm_0.9": ("swmm", 0.9), "swmm_0.6": ("swmm", 0.6),
+            "boyd_0.6": ("boyd-as-coded", 0.6)}
+    with ThreadPoolExecutor(len(jobs)) as ex:
+        futures = {k: ex.submit(fu.run_flume, eng, d, str(base / k)) for k, (eng, d) in jobs.items()}
+        runs = {k: f.result() for k, f in futures.items()}
+    out = {}
+    summary = {}
+    for k, (engine, d) in jobs.items():
+        info, path = runs[k]
+        series = fu.read_series(path)
+        res = fu.score_series(series, d)
+        res["engine"], res["diameter_m"], res["run"] = engine, d, info
+        out[k] = (series, res)
+        summary[k] = res
+        with open(results_dir / f"flume-{k}.csv", "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["time_s", "q_m3s", "hw_depth_m", "tw_depth_m", "control"])
+            for row in zip(series["t"], series["q"], series["hw"], series["tw"], series["control"]):
+                w.writerow([f"{row[0]:.3f}", f"{row[1]:.6f}", f"{row[2]:.5f}", f"{row[3]:.5f}", row[4]])
+    with open(results_dir / "flume-summary.json", "w") as f:
+        json.dump(summary, f, indent=1)
+    return out
+
+
+def test_flume_swmm_series_inside_band(flume):
+    """The 0.9 m pipe, SWMM engine, every recorded instant of the rise-fall-rise + reverse run."""
+    _series, res = flume["swmm_0.9"]
+    assert res["reversals"] == 1
+    assert res["violations"] == 0, (
+        f"{res['violations']}/{res['n']} instants outside the band, worst {res['worst_ratio']:.2f}x "
+        f"tol at t={res['worst_t']:.0f} s")
+    assert res["chatter_excess"] <= 5
+
+
+def test_flume_swmm_plateaus_and_peak_hw(flume):
+    _series, res = flume["swmm_0.9"]
+    assert {n: p["err_pct"] for n, p in res["plateaus"].items() if abs(p["err_pct"]) > 2.0} == {}
+    bad = {n: p["diff_mm"] for n, p in res["plateau_peak_hw"].items() if abs(p["diff_mm"]) > 30.0}
+    assert bad == {}, f"peak HW more than 30 mm from hds5: {bad}"
+
+
+def test_flume_swmm_small_pipe_positive_control(flume):
+    _series, res = flume["swmm_0.6"]
+    assert res["violations"] == 0, (res["violations"], res["worst_ratio"], res["worst_t"])
+
+
+def test_flume_boyd_as_coded_fails_the_band_on_the_0p6_pipe(flume):
+    """NEGATIVE CONTROL: if the band cannot fail Boyd as coded on the 0.6 m pipe, it proves
+    nothing about the SWMM engine passing it."""
+    _series, res = flume["boyd_0.6"]
+    assert res["violations"] > 0 or any(abs(p["err_pct"]) > 2.0 for p in res["plateaus"].values()), (
+        "Boyd as coded passed the band: the band is not discriminating")
+
+
+def test_flume_control_flag_written_to_csv(flume):
+    series, _res = flume["swmm_0.9"]
+    assert set(series["control"]) <= {"barrel", "inlet", "reverse-inlet"}
+    assert "inlet" in series["control"]
+    boyd, _ = flume["boyd_0.6"]
+    assert set(boyd["control"]) == {"n/a"}
