@@ -84,6 +84,27 @@ def test_oracle_outlet_control_within_2pct(oracle_rows):
     assert bad == []
 
 
+def test_oracle_reference_step_detection():
+    """The hds5 HW(Q) step at the critical slope (cmp_hw, L 20 m, S 2 %, free outlet) is found
+    (against the converged march) and switches the point to Q space; a smooth neighbourhood
+    stays in HW space; a real miss still fails."""
+    e = [t for t in ENTRANCE_TYPES if t.hds5 == "cmp_hw"][0]
+    ref = oracle.reference_for(e, 20.0, 0.02)
+    assert oracle.hw_jump(ref, 1.235, 0.0, 0.02 * 1.08) > 0.05      # the 5.4 % HW step
+    assert oracle.hw_jump(ref, 0.99, 0.0, 0.02 * 0.9) == 0.0        # HW/D 1.0: smooth
+    # a Q on the converged step's flat side (-0.25 % in Q) passes in Q space
+    s = oracle.score_point(ref, 1.2138, 1.08, 0.0)
+    assert s["score_space"] == "q" and s["pass_2pct"] and abs(s["err_q_pct"]) < 0.5 < abs(s["err_pct"])
+    # the stock C2 flow 1.2434 is +2.26 % in Q, 2.13 % from the step: HW space, FAILS (+4.65 %)
+    s = oracle.score_point(ref, 1.2434, 1.08, 0.0)
+    assert s["score_space"] == "hw" and not s["pass_2pct"] and s["err_pct"] > 4.0
+    # the same rule still FAILS a real Q miss on the step: -5 % in Q
+    assert not oracle.score_point(ref, 0.95 * 1.2169, 1.08, 0.0)["pass_2pct"]
+    # the vendored 80-step march places the step 0.74 % higher: the default is NOT the evidence
+    assert oracle.hw_jump(ref, 1.2249, 0.0, 0.02 * 1.08) > 0.05
+    assert oracle.CONVERGED_NSTEPS >= 800
+
+
 def test_oracle_inlet_control_within_2pct(oracle_rows):
     rows = [r for r in oracle_rows if r["scenario"] == "inlet"]
     bad = [(r["hds5"], r["hw_d"], r["err_pct"]) for r in rows if not r["pass_2pct"]]

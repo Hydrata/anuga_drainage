@@ -26,8 +26,11 @@ the flow reversal): there the barrel is a full rigid water column and Q_ref is t
 from Q_qs (see inertia_aware_reference). Plateaus are scored against Q_qs.
 
 dV_qs/dt is the quasi-steady barrel storage change (a barrel that fills or empties cannot
-pass the quasi-steady flow); within +-30 s of a fill/unfill crossing (where that storage
-term is a step, not a rate) instants are REPORTED but excluded. The last 60 s of every
+pass the quasi-steady flow). The stored V_qs is A(yn) L or A_full L, a STEP at a fill/unfill
+crossing, and np.gradient spreads that step over the crossing second and its neighbours, so
+those instants (+-EXCLUDE_S = 1 s) are REPORTED but excluded. (The window was +-30 s; the
+protocol audit found the 126 instants it hid were all outlet-partial engine misses, none a
+reference artefact, so the window was cut to the step's own footprint: a tightening.) The last 60 s of every
 hold (plateau) must be within 2 % of Q_qs. Chatter: sign changes of dQ per tumbling
 60 s window at HW/D > 0.5, minus the oracle's own, must be <= 5.
 """
@@ -72,7 +75,7 @@ PLATEAUS = {"A": (1260, 1320), "C": (3180, 3240), "D1": (3480, 3540), "D2": (420
 REL_TOL = 0.02
 ABS_TOL = 0.005          # m3/s
 LAG_S = 2
-EXCLUDE_S = 30
+EXCLUDE_S = 1
 CHATTER_WINDOW_S = 60
 CHATTER_MAX = 5
 
