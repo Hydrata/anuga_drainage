@@ -1,8 +1,8 @@
 """TASK-3630: headwall culvert backend, design 1 (host backend).
 
-AC1 (1D oracle vs hds5.py, 2 %) is split by control: outlet control is a hard
-gate; inlet control is a strict xfail that RECORDS the measured gate failure
-(results/oracle-1d.csv in the deploy spike folder). AC3 (mode 1 vs mode 2 peak
+AC1 (1D oracle vs hds5.py, 2 %): inlet control is enforced by the coupler (TASK-3672,
+mechanism C2: culvert code 0 in the .inp, SWMM's barrel flow capped at the HDS-5 inlet
+rating), so both controls are hard gates. AC3 (mode 1 vs mode 2 peak
 HW within 1 mm) and AC5 (ANUGA-side volume = sum(Q dt) clipped to the water
 present) run real ANUGA simulations, each in its own subprocess (an ANUGA/MPI
 abort kills the interpreter silently).
@@ -84,12 +84,6 @@ def test_oracle_outlet_control_within_2pct(oracle_rows):
     assert bad == []
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "D9 1D gate MEASURED FAILING for inlet control (12-10/13-10-26): SWMM 5.2.4's culvert "
-    "code matches hds5.py exactly as a formula, but inside dynamic wave it is evaluated at a "
-    "reset upstream head and dropped once the barrel is full, so HW errors reach -50..+29 % "
-    "(cmp_mitered, cmbox_thinproj, all boxes unsubmerged, circles at HW/D 0.3 and >= 2.5). "
-    "A result for the operator's design-1 / design-2 / C decision, NOT a bug to hide."))
 def test_oracle_inlet_control_within_2pct(oracle_rows):
     rows = [r for r in oracle_rows if r["scenario"] == "inlet"]
     bad = [(r["hds5"], r["hw_d"], r["err_pct"]) for r in rows if not r["pass_2pct"]]
@@ -147,6 +141,25 @@ def test_headwall_volume_clipped_to_available(tmp_path):
     assert dst.total_applied_volume == pytest.approx(have, rel=1e-12)
     assert cs._exchange(0, 1000.0, 0.5) == 0.0          # now dry: nothing moves
     cs.finalize()
+
+
+def test_headwall_series_csv_has_control_column(tmp_path):
+    """The per-sample control flag is in the series and in write_csv's output."""
+    import csv
+    for engine, allowed in (("swmm", {"barrel", "inlet", "reverse-inlet"}), ("boyd-as-coded", {"n/a"})):
+        out = tmp_path / f"{engine}.json"
+        series = tmp_path / f"series_{engine}"
+        r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "_culvert_flume.py"), "1",
+                            engine, "40", str(out), "--series-dir", str(series)],
+                           capture_output=True, text=True, timeout=900)
+        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-3000:]
+        (path,) = list(series.iterdir())
+        with open(path) as f:
+            rows = list(csv.DictReader(f))
+        assert list(rows[0]) == ["time_s", "q_m3s", "hw_level_m", "tw_level_m", "control"]
+        assert len(rows) >= 30 and {row["control"] for row in rows} <= allowed
+        if engine == "swmm":
+            assert {row["control"] for row in rows} & {"barrel", "inlet"}
 
 
 def test_headwall_boyd_engine_switch_runs(tmp_path):

@@ -21,8 +21,8 @@ def _culvert(i=0, barrels=1, shape="box", blockage=0.0, entrance="square_edge_he
     return HeadwallCulvert.from_dict(d)
 
 
-def _parse_and_run(culverts, tmp_path, seconds=30):
-    eng = SwmmHeadwallEngine(culverts, str(tmp_path), duration_s=seconds + 5)
+def _parse_and_run(culverts, tmp_path, seconds=30, **kw):
+    eng = SwmmHeadwallEngine(culverts, str(tmp_path), duration_s=seconds + 5, **kw)
     for _ in range(seconds):
         eng.set_stages([c.upstream_invert_m + 1.0 for c in culverts],
                        [c.downstream_invert_m for c in culverts])
@@ -39,7 +39,7 @@ def test_inp_writer_barrels_parse_with_zero_errors(tmp_path, barrels):
     assert rpt_errors(eng.rpt_path) == []
     assert q[0] > 0.0
     text = open(eng.inp_path).read()
-    assert f"RECT_CLOSED 0.90000 1.20000 0 0 {barrels} 10" in text
+    assert f"RECT_CLOSED 0.90000 1.20000 0 0 {barrels} 0" in text   # C2: code 0
 
 
 def test_inp_writer_twenty_culverts_one_model(tmp_path):
@@ -56,6 +56,10 @@ def test_inp_writer_every_valid_entrance_parses(tmp_path):
     eng, q = _parse_and_run(culverts, tmp_path)
     assert rpt_errors(eng.rpt_path) == []
     assert (q > 0).all()
+    assert {line.split()[-1] for line in open(eng.inp_path) if line.startswith("CUL")
+            and ("RECT_CLOSED" in line or "CIRCULAR" in line)} == {"0"}     # C2: coupler enforces
+    eng, q = _parse_and_run(culverts, tmp_path / "native", swmm_inlet_code=True)
+    assert rpt_errors(eng.rpt_path) == []
     codes = {line.split()[-1] for line in open(eng.inp_path) if line.startswith("CUL")
              and ("RECT_CLOSED" in line or "CIRCULAR" in line)}
     assert codes == {str(e.swmm_code) for e in ENTRANCE_TYPES}

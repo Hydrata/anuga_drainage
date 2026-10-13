@@ -7,12 +7,20 @@ culvert grill, ``KEEP_dummy_headwall_rating.py``)::
        ^ D_HW<i>  1 m dummy conduit, large section, n 0.010, no losses
     J_HW<i> (JUNCTION, invert = upstream invert)
        | CUL<i>   the culvert: shape, one-barrel geometry after blockage,
-       v          Barrels, HDS-5 culvert code, [LOSSES] Ke / exit 1.0
+       v          Barrels, [LOSSES] Ke / exit 1.0; culvert code 0 (see below)
     O_TW<i> (OUTFALL, FIXED stage := 2D tailwater)
 
 An outfall stage only drives flow when the outfall is the DOWNSTREAM node of
 its link, hence the dummy conduit runs J_HW -> O_HW. Positive CUL<i> flow is
 inlet -> outlet. Fully blocked culverts are left out (the coupler holds Q = 0).
+
+Inlet control is NOT left to SWMM (mechanism C2, TASK-3672): SWMM 5.2.4's culvert
+code skips the inlet equations once both barrel ends are full, returns a stale Form 1
+flow out of findroot_Ridder, and applies a -7.0 mitered slope factor (HDS-5 gives
+-0.7), so the conduit is written with culvert code 0 and the coupler caps its flow
+at the HDS-5 inlet-control rating (see coupler.py). ``swmm_inlet_code=True`` writes
+the HDS-5 culvert code instead (the SWMM-native route, used only for the C-level
+proof in the deploy spike folder).
 """
 from __future__ import annotations
 
@@ -77,7 +85,7 @@ def dummy_size(culvert) -> tuple:
 
 def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
               report_step_s=3600, start=DEFAULT_START, title="anuga_drainage headwall culverts",
-              extra_options=None, initial_stages=None):
+              extra_options=None, initial_stages=None, swmm_inlet_code=False):
     """Write the .inp for ``culverts`` (HeadwallCulvert list) to ``path``.
 
     ``duration_s`` must cover the ANUGA run (SWMM stops at END_TIME).
@@ -85,6 +93,8 @@ def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
     ``initial_stages``: optional per-culvert (hw_stage, tw_stage) to start the two
     outfalls (and the junction depth) at, so the first imposed stage does not
     create barrel storage out of nothing (a SWMM continuity artefact).
+    ``swmm_inlet_code``: write the entrance's SWMM culvert code (SWMM-native inlet
+    control) instead of 0 (inlet control enforced by the coupler).
     Returns an :class:`InpLayout` mapping culvert index -> SWMM names.
     """
     if routing_step <= 0 or routing_step > 1:
@@ -113,7 +123,7 @@ def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
         conduits.append(f"{n.d_hw:<10} {n.j_hw:<10} {n.o_hw:<10} {DUMMY_LENGTH_M:.2f} {DUMMY_N} 0 0 0 0")
         conduits.append(f"{n.conduit:<10} {n.j_hw:<10} {n.o_tw:<10} {c.length_m:.4f} {c.n:.4f} 0 0 0 0")
         xsections.append(f"{n.d_hw:<10} RECT_CLOSED {dh:.3f} {dw:.3f} 0 0 1")
-        xsections.append(f"{n.conduit:<10} {shape} {g1:.5f} {g2:.5f} 0 0 {c.barrels} {e.swmm_code}")
+        xsections.append(f"{n.conduit:<10} {shape} {g1:.5f} {g2:.5f} 0 0 {c.barrels} {e.swmm_code if swmm_inlet_code else 0}")
         losses.append(f"{n.conduit:<10} {e.ke} 1.0 0 NO 0")
         (xi, yi), (xo, yo) = c.inlet_xy, c.outlet_xy
         ux, uy = c.outward_direction("inlet")

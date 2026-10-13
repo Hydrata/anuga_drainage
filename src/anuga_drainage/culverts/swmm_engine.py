@@ -15,7 +15,8 @@ from .inp_writer import write_inp
 
 class SwmmHeadwallEngine:
     def __init__(self, culverts, workdir, *, duration_s=7 * 86400, routing_step=0.25,
-                 inp_name="culverts.inp", extra_options=None, initial_stages=None):
+                 inp_name="culverts.inp", extra_options=None, initial_stages=None,
+                 swmm_inlet_code=False):
         from pyswmm import Links, Nodes, Simulation
 
         os.makedirs(workdir, exist_ok=True)
@@ -23,7 +24,8 @@ class SwmmHeadwallEngine:
         self.inp_path = os.path.join(workdir, inp_name)
         self.layout = write_inp(self.culverts, self.inp_path, duration_s=duration_s,
                                 routing_step=routing_step, extra_options=extra_options,
-                                initial_stages=initial_stages)
+                                initial_stages=initial_stages,
+                                swmm_inlet_code=swmm_inlet_code)
         self.sim = Simulation(self.inp_path)
         self.sim.step_advance(1)
         self.sim.start()
