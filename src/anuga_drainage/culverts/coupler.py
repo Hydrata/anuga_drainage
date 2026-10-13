@@ -22,6 +22,9 @@ Design 1 (epic 3585 D6/D7, spike scope, host backend):
   rating of the upstream end (forward: the entrance at the inlet; reverse: the mirrored
   culvert at the outlet), see inlet_control.py; the control that governed each sample is
   recorded. SWMM's own culvert code skips inlet control once both ends are full.
+* reverse flow through the barrel is handled by the engine (TASK-3673,
+  swmm_engine.ReverseBarrel): while Q < 0 the imposed headwater stage is floored at the
+  brink (invert + dc) and the conduit's loss coefficients follow the flow direction.
 
 Sign convention: Q > 0 flows inlet -> outlet.
 """
