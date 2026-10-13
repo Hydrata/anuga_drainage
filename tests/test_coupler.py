@@ -114,3 +114,43 @@ def test_coupler_smoothing_state_persists_across_steps():
     # With heads/depths constant, smoothing ramps the flux up toward the target,
     # so the second step exceeds the first.
     assert second[0] > first[0]
+
+
+# --- TASK-3677 AC4 (D25): C2 vs the patched libswmm (fix4) on the steady grid -----------------
+# tests/data/c2_vs_libswmm.csv is written by the deploy repo's
+# docs/reports/2026-10-12-culvert-spike/scripts/c2_vs_libswmm.py (196 points). D25: the 0.5 %
+# gate applies where fix4 itself is within 0.5 % of HDS-5; the other points are excluded and
+# reported against HDS-5. The excluded list is asserted so it cannot grow silently.
+
+D25_EXCLUDED = [   # (entrance, scenario, HW/D): fix4 more than 0.5 % from HDS-5
+    ("cmp_hw", "inlet", 1.2), ("cmp_hw", "inlet", 1.5), ("cmp_hw", "inlet", 2.0),
+    ("cmp_hw", "inlet", 2.5), ("cmp_hw", "inlet", 3.0), ("cmp_mitered", "inlet", 3.0),
+]
+
+
+def _c2_vs_libswmm_rows():
+    import csv
+    import pathlib
+    path = pathlib.Path(__file__).parent / "data" / "c2_vs_libswmm.csv"
+    with open(path) as f:
+        return [dict(r, hw_d=float(r["hw_d"]), diff=float(r["diff_pct"]), lib=float(r["libswmm_vs_hds5_pct"]),
+                     c2=float(r["c2_vs_hds5_pct"])) for r in csv.DictReader(f)]
+
+
+def test_c2_vs_libswmm_d25_excluded_points_are_asserted():
+    rows = _c2_vs_libswmm_rows()
+    assert len(rows) == 196
+    partial = [r for r in rows if r["regime_hds5"] == "outlet-partial"]
+    excluded = [r for r in rows if r["regime_hds5"] != "outlet-partial" and abs(r["lib"]) > 0.5]
+    assert partial == []
+    assert [(r["hds5"], r["scenario"], r["hw_d"]) for r in excluded] == D25_EXCLUDED
+    # reported against HDS-5: C2 is within 1 % of the independent reference at every excluded point
+    assert max(abs(r["c2"]) for r in excluded) < 1.0
+
+
+def test_c2_vs_libswmm_gated_points_within_half_percent():
+    rows = _c2_vs_libswmm_rows()
+    gated = [r for r in rows if r["regime_hds5"] != "outlet-partial" and abs(r["lib"]) <= 0.5]
+    bad = [(r["hds5"], r["scenario"], r["hw_d"], r["diff"]) for r in gated if abs(r["diff"]) > 0.5]
+    assert len(gated) == 190
+    assert bad == [], f"{len(bad)}/{len(gated)} gated points differ from libswmm by more than 0.5 %: {bad}"

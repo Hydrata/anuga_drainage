@@ -341,12 +341,14 @@ def run_all(workers=None):
 # (and, to a lesser degree, at any step in dQ_qs/dt, e.g. the end of a ramp). SWMM's dwflow.c
 # carries exactly this term (the qOld local inertia; sigma = 0 for a surcharged closed conduit).
 #
-# SWITCHING RULE (applicability, no tuning constant): the reference is the rigid column over
+# SWITCHING RULE (applicability, no tuning constant; D24 tail below): the reference is the rigid column over
 # every contiguous interval in which both ends are drowned (HW >= rise and TW >= rise, depths
 # above the respective inverts), integrated from Q_qs at the interval's first instant on the
 # imposed (1D) or MEASURED (2D) stages; it is Q_qs everywhere else. In the 4800 s series this is
 # 3874-4461 s (TW reaches 1 D in segment D until HW falls below 1 D in segment E); segments A-C
-# and every plateau window are untouched.
+# and every plateau window are untouched. D24 (operator ruling 13-10-26): when the drowned interval
+# ends the same ODE keeps running on the same stages until the column re-meets Q_qs (the sign of
+# column - Q_qs changes), then Q_qs takes over: no hard switch at the end of the interval.
 G = 9.81
 COLUMN_DT = 0.25          # s, explicit Euler substep of the column (stable: min tau ~ 2 s)
 
@@ -379,7 +381,8 @@ def inertia_aware_reference(fwd, rev, L, S, area, rise, t, hw, tw, qref, coeff_s
             continue
         q = qref[i]
         j = i + 1
-        while j < n and drowned[j]:
+        side = 0.0          # sign of (column - Q_qs) once the drowned interval has ended (0: still drowned)
+        while j < n:
             tt = t[j - 1]
             while tt < t[j] - 1e-9:
                 h = min(COLUMN_DT, t[j] - tt)
@@ -388,6 +391,17 @@ def inertia_aware_reference(fwd, rev, L, S, area, rise, t, hw, tw, qref, coeff_s
                 tw_m = tw[j - 1] + w * (tw[j] - tw[j - 1])
                 q += h / c * (hw_m - tw_m + S * L - loss_head(fwd, rev, L, S, q, hw_m, tw_m))
                 tt += h
+            if drowned[j]:
+                ref[j] = q
+                j += 1
+                continue
+            # D24: past the drowned interval the SAME ODE keeps running until it re-meets Q_qs
+            # (no hard switch, no constant); then Q_qs takes over.
+            d = q - qref[j]
+            if side == 0.0:
+                side = np.sign(d)
+            if side == 0.0 or np.sign(d) != side:
+                break
             ref[j] = q
             j += 1
         i = j
