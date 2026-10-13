@@ -44,11 +44,11 @@ def unsteady(results_dir):
         with open(folder / f"{name}.csv", "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["t_s", "hw_m", "tw_m", "q_m3s", "q_swmm_m3s", "q_hds5_m3s", "control",
-                        "regime_hds5"])
+                        "regime_hds5", "q_ref_m3s"])
             for k in range(len(s["t"])):
                 w.writerow([int(s["t"][k]), f"{s['hw'][k]:.5f}", f"{s['tw'][k]:.5f}",
-                            f"{s['q'][k]:.6f}", f"{s['q_raw'][k]:.6f}", f"{s['q_ref'][k]:.6f}",
-                            CONTROL_NAMES[int(s["flag"][k])], s["regime"][k]])
+                            f"{s['q'][k]:.6f}", f"{s['q_raw'][k]:.6f}", f"{s['q_qs'][k]:.6f}",
+                            CONTROL_NAMES[int(s["flag"][k])], s["regime"][k], f"{s['q_ref'][k]:.6f}"])
     with open(results_dir / "unsteady-summary.json", "w") as f:
         json.dump([res for res, _ in out], f, indent=1)
     return [res for res, _ in out]
@@ -79,6 +79,34 @@ def test_unsteady_reverse_segment_inside_band(unsteady):
            f"{r['segments']['E']['worst_ratio']:.2f}x tol"
            for r in unsteady if r["segments"]["E"]["violations"]]
     assert bad == [], f"{len(bad)}/42 cases outside the band in segment E:\n" + "\n".join(bad)
+
+
+def test_unsteady_reversal_crossing_inside_band(unsteady):
+    """Segment E's reversal ramp (4260-4420 s) alone, against the inertia-aware reference (the
+    rigid column where both ends are drowned). The reverse HOLD (4420-4800 s) is the steady
+    reverse-barrel regime and is scored by test_unsteady_reverse_segment_inside_band."""
+    bad = [f"{r['case']}: {r['segments']['E_cross']['violations']} instants, worst "
+           f"{r['segments']['E_cross']['worst_ratio']:.2f}x tol"
+           for r in unsteady if r["segments"]["E_cross"]["violations"]]
+    assert bad == [], f"{len(bad)}/42 cases outside the band in the reversal:\n" + "\n".join(bad)
+
+
+@pytest.mark.parametrize("control", ["quasi_steady", "column_x2.0", "column_x0.5"])
+def test_unsteady_wrong_reference_fails_the_reversal(unsteady, control):
+    """NEGATIVE CONTROLS for the inertia-aware reference: the quasi-steady reference (no
+    inertia) and a column with L/(gA) doubled or halved must each FAIL the reversal ramp in
+    every case, else passing against the column proves nothing."""
+    passed = [r["case"] for r in unsteady if r["controls_reference"][control]["E_cross"] == 0]
+    assert passed == [], f"{control} passed the reversal in {passed}"
+
+
+def test_unsteady_column_crosses_zero_with_the_coupler(unsteady):
+    """The coupler's flow reverses within the band's 2 s lag of the rigid column, and more than
+    that after the quasi-steady reference (the inertial delay the quasi-steady oracle lacks)."""
+    for r in unsteady:
+        c = r["crossing_s"]
+        assert abs(c["coupler"] - c["column"]) <= u.LAG_S, (r["case"], c)
+        assert c["coupler"] - c["quasi_steady"] > u.LAG_S, (r["case"], c)
 
 
 def test_unsteady_plateaus_within_2pct(unsteady):
@@ -179,6 +207,15 @@ def test_flume_swmm_series_inside_band(flume):
         f"{res['violations']}/{res['n']} instants outside the band, worst {res['worst_ratio']:.2f}x "
         f"tol at t={res['worst_t']:.0f} s")
     assert res["chatter_excess"] <= 5
+
+
+@pytest.mark.parametrize("control", ["quasi_steady", "column_x2.0", "column_x0.5"])
+def test_flume_wrong_reference_fails_the_reversal(flume, control):
+    """NEGATIVE CONTROLS on the 2D 0.9 m run (column integrated on the measured stages)."""
+    _series, res = flume["swmm_0.9"]
+    assert res["controls_reference"][control]["E_cross"] > 0, res["controls_reference"]
+    c = res["crossing_s"]
+    assert abs(c["coupler"] - c["column"]) <= u.LAG_S < c["coupler"] - c["quasi_steady"], c
 
 
 def test_flume_swmm_plateaus_and_peak_hw(flume):

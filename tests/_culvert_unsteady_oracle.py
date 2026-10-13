@@ -18,7 +18,12 @@ Series (4800 s; depths in rises D above the respective invert, linear between kn
 
 Band per instant (the D9 protocol; never widened)::
 
-    |Q(t) - Q_qs(t - lag)| <= max(2 % |Q_qs|, 5 L/s) + |dV_qs/dt| + 2 s |dQ_qs/dt|    for some lag in {0, 1, 2} s
+    |Q(t) - Q_ref(t - lag)| <= max(2 % |Q_ref|, 5 L/s) + |dV_qs/dt| + 2 s |dQ_ref/dt|    for some lag in {0, 1, 2} s
+
+Q_ref = Q_qs except where BOTH ends are drowned (HW >= D and TW >= D: 3874-4461 s, which holds
+the flow reversal): there the barrel is a full rigid water column and Q_ref is that column,
+(L / (g A)) dQ/dt = (stage_hw - stage_tw) - H(Q), H the same HDS-5 loss relation, integrated
+from Q_qs (see inertia_aware_reference). Plateaus are scored against Q_qs.
 
 dV_qs/dt is the quasi-steady barrel storage change (a barrel that fills or empties cannot
 pass the quasi-steady flow); within +-30 s of a fill/unfill crossing (where that storage
@@ -55,6 +60,11 @@ HW_KNOTS = [(0, 0.3), (1200, 3.0), (1320, 3.0), (2520, 0.3), (3120, 2.5), (3240,
 TW_KNOTS = [(0, 0.0), (3540, 0.0), (4140, 1.8), (4260, 1.8), (4560, 2.0), (T_END, 2.0)]
 SEGMENTS = {"A": (0, 1320), "B": (1320, 2520), "C": (2520, 3240), "D": (3240, 4260),
             "E": (4260, T_END)}
+#: segment E split for REPORTING: the reversal (ramp, 4260-4420 s) and the reverse hold + late
+#: ramp (4420-4800 s, the steady reverse-barrel regime; not an inertia question).
+E_SPLIT = {"E_cross": (4260, 4420), "E_hold": (4420, T_END)}
+#: the deliberately wrong columns (L / (g A) scaled) that must FAIL segment E_cross.
+WRONG_COLUMN_SCALES = (2.0, 0.5)
 #: holds whose last 60 s are scored as plateaus.
 PLATEAUS = {"A": (1260, 1320), "C": (3180, 3240), "D1": (3480, 3540), "D2": (4200, 4260),
             "E": (4740, T_END)}
@@ -231,7 +241,8 @@ def score_band(t, q, qref, vref, plateaus, segments=None, hw=None, rise=D, regim
 
 def score(t, hw, tw, q, qref, vref, regime, flag):          # t, q, flag: 1..T_END; rest 0..T_END
     """Band metrics for one 1D case (see :func:`score_band`) plus control/regime tallies."""
-    res = score_band(t, q, qref[1:], vref[1:], PLATEAUS, SEGMENTS, hw[1:], regime=regime[1:])
+    res = score_band(t, q, qref[1:], vref[1:], PLATEAUS, {**SEGMENTS, **E_SPLIT}, hw[1:],
+                     regime=regime[1:])
     res["controls"] = {CONTROL_NAMES[k]: int((flag == k).sum()) for k in (BARREL, 1, 2)}
     res["regimes"] = sorted(set(regime.tolist()))
     return res
@@ -242,12 +253,27 @@ def run_case(args):
     e = ENTRANCE_TYPES[entrance_index]
     L, S = GEOMETRIES[geom]
     t, hw, tw = stage_series(S, L)
-    qref, regime, vref = series_oracle(e, L, S, hw, tw)
+    q_qs, regime, vref = series_oracle(e, L, S, hw, tw)
+    qs = QuasiSteady(e, L, S)
+    qref, _column = inertia_aware_reference(qs.fwd, qs.rev, L, S, qs.area_full, D, t, hw, tw, q_qs)
     q, raw, flag = run_coupler(e, L, S, hw, tw)
     res = score(t[1:], hw, tw, q, qref, vref, regime, flag)
+    segments = {**SEGMENTS, **E_SPLIT}
+    # negative controls: the quasi-steady reference everywhere, and a column with L/(gA) x2, x0.5
+    controls = {"quasi_steady": q_qs}
+    for scale in WRONG_COLUMN_SCALES:
+        controls[f"column_x{scale}"] = inertia_aware_reference(
+            qs.fwd, qs.rev, L, S, qs.area_full, D, t, hw, tw, q_qs, coeff_scale=scale)[0]
+    scored = {name: score_band(t[1:], q, ref[1:], vref[1:], PLATEAUS, segments)
+              for name, ref in controls.items()}
+    res["controls_reference"] = {name: {k: v["violations"] for k, v in sc["segments"].items()}
+                                 for name, sc in scored.items()}
+    res["plateaus"] = scored["quasi_steady"]["plateaus"]     # a hold is steady: Q_qs is the physics
+    res["crossing_s"] = dict(coupler=crossing_time(t[1:], q), column=crossing_time(t, qref),
+                             quasi_steady=crossing_time(t, q_qs))
     res.update(case=f"{e.hds5}@{geom}", hds5=e.hds5, geometry=geom)
     return res, dict(t=t[1:], hw=hw[1:], tw=tw[1:], q=q, q_raw=raw, flag=flag, q_ref=qref[1:],
-                     regime=regime[1:])
+                     q_qs=q_qs[1:], regime=regime[1:])
 
 
 def run_all(workers=None):
@@ -255,3 +281,76 @@ def run_all(workers=None):
     workers = workers or int(os.environ.get("CULVERT_UNSTEADY_WORKERS", 0)) or min(16, os.cpu_count() or 1)
     with ProcessPoolExecutor(max_workers=workers) as ex:
         return list(ex.map(run_case, jobs))
+
+
+# ------------------------------------------------------------------ inertia-aware reference
+# The quasi-steady reference has no water-column inertia. A barrel with BOTH ends drowned is
+# necessarily full: a rigid column of length L and area A_full (all barrels),
+#
+#     (L / (g A)) dQ/dt = (stage_hw - stage_tw) - H(Q)
+#
+# where H(Q) is the signed stage difference HDS-5 needs to carry Q steadily at the present
+# depths (forward: Culvert.hw(Q, TW) - TW + S L; reverse: the mirrored culvert), i.e. the SAME
+# loss relation as the quasi-steady reference (H(Q_qs) = stage difference). The column relaxes
+# to Q_qs with the time constant tau = (L / (g A)) / H'(Q); H ~ k Q^2, so tau grows without
+# bound as Q -> 0 and the quasi-steady reference stops being the physics at a FLOW REVERSAL
+# (and, to a lesser degree, at any step in dQ_qs/dt, e.g. the end of a ramp). SWMM's dwflow.c
+# carries exactly this term (the qOld local inertia; sigma = 0 for a surcharged closed conduit).
+#
+# SWITCHING RULE (applicability, no tuning constant): the reference is the rigid column over
+# every contiguous interval in which both ends are drowned (HW >= rise and TW >= rise, depths
+# above the respective inverts), integrated from Q_qs at the interval's first instant on the
+# imposed (1D) or MEASURED (2D) stages; it is Q_qs everywhere else. In the 4800 s series this is
+# 3874-4461 s (TW reaches 1 D in segment D until HW falls below 1 D in segment E); segments A-C
+# and every plateau window are untouched.
+G = 9.81
+COLUMN_DT = 0.25          # s, explicit Euler substep of the column (stable: min tau ~ 2 s)
+
+
+def loss_head(fwd, rev, L, S, q, hw, tw):
+    """Signed stage difference (HW stage - TW stage, m) HDS-5 needs to carry q at depths hw, tw."""
+    if q > 1e-12:
+        return fwd.hw(q, max(tw, 0.0)) - tw + S * L
+    if q < -1e-12:
+        return hw + S * L - rev.hw(-q, max(hw, 0.0))
+    return 0.0
+
+
+def inertia_aware_reference(fwd, rev, L, S, area, rise, t, hw, tw, qref, coeff_scale=1.0):
+    """(reference, column mask) for one series.
+
+    ``fwd`` / ``rev``: the hds5 culvert and its mirror; ``area``: full barrel area (m2);
+    ``rise``: barrel rise (m); ``t`` (s, may have gaps), ``hw`` / ``tw`` depths (m) above the
+    inlet / outlet invert at those instants (stages linear in between), ``qref`` the
+    quasi-steady flow there. ``coeff_scale`` multiplies L / (g A): the deliberately wrong
+    column of the negative control."""
+    t, hw, tw, qref = (np.asarray(a, dtype=float) for a in (t, hw, tw, qref))
+    c = coeff_scale * L / (G * area)                       # s2/m2
+    ref = qref.copy()
+    drowned = (hw >= rise) & (tw >= rise)
+    i, n = 0, len(t)
+    while i < n:
+        if not drowned[i]:
+            i += 1
+            continue
+        q = qref[i]
+        j = i + 1
+        while j < n and drowned[j]:
+            tt = t[j - 1]
+            while tt < t[j] - 1e-9:
+                h = min(COLUMN_DT, t[j] - tt)
+                w = (tt + 0.5 * h - t[j - 1]) / (t[j] - t[j - 1])
+                hw_m = hw[j - 1] + w * (hw[j] - hw[j - 1])
+                tw_m = tw[j - 1] + w * (tw[j] - tw[j - 1])
+                q += h / c * (hw_m - tw_m + S * L - loss_head(fwd, rev, L, S, q, hw_m, tw_m))
+                tt += h
+            ref[j] = q
+            j += 1
+        i = j
+    return ref, drowned
+
+
+def crossing_time(t, q):
+    """First time q goes from > 0 to <= 0 (s), or None."""
+    k = np.flatnonzero((q[:-1] > 0) & (q[1:] <= 0))
+    return float(t[k[0] + 1]) if k.size else None

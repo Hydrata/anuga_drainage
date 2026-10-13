@@ -7,7 +7,9 @@ the upstream Inlet_operator's Q(t) = Q_hds5(HW target, TW target) + A_pond dHW/d
 NEGATIVE (a sink) while the culvert flows backwards, and the downstream Time_boundary imposes
 the tailwater. The recorded series (write_csv, with the per-sample control flag) is scored with
 the SAME band as the 1D series against hds5 evaluated at the MEASURED headwater and tailwater
-(2D region stages, not the targets), on the recorded times (the 1 s series has gaps).
+(2D region stages, not the targets), on the recorded times (the 1 s series has gaps); across the
+drowned-both-ends interval (which holds the flow reversal) the reference is the rigid water
+column integrated on those measured stages (_culvert_unsteady_oracle.inertia_aware_reference).
 """
 from __future__ import annotations
 
@@ -110,16 +112,34 @@ def read_series(path):
                 control=[r["control"] for r in rows])
 
 
-def score_series(series, diameter, plateaus=PLATEAUS):
+def score_series(series, diameter, plateaus=PLATEAUS, coeff_scale=1.0):
     """Apply the 1D band to a recorded 2D series; returns a JSON-able dict."""
     ref = Flume1D(diameter)
     keep = series["t"] >= STARTUP_S
     t, q, hw, tw = (series[k][keep] for k in ("t", "q", "hw", "tw"))
     pts = [ref.point(h, w) for h, w in zip(hw, tw)]
-    qref = np.array([p[0] for p in pts])
+    q_qs = np.array([p[0] for p in pts])
     vref = np.array([p[2] for p in pts])
-    res = u.score_band(t, q, qref, vref, plateaus, segments=u.SEGMENTS, hw=hw, rise=diameter,
+    # inertia-aware reference: the rigid column integrated on the MEASURED stages wherever both
+    # ends are drowned (_culvert_unsteady_oracle.inertia_aware_reference)
+    qref, _column = u.inertia_aware_reference(ref.fwd, ref.rev, L, S, ref.area_full, diameter, t,
+                                              hw, tw, q_qs, coeff_scale=coeff_scale)
+    segments = {**u.SEGMENTS, **u.E_SPLIT}
+    res = u.score_band(t, q, qref, vref, plateaus, segments=segments, hw=hw, rise=diameter,
                        regime=[p[1] for p in pts])
+    # negative controls: the quasi-steady reference, and the wrong columns (L/(gA) x2, x0.5)
+    controls = {"quasi_steady": q_qs}
+    if coeff_scale == 1.0:
+        for scale in u.WRONG_COLUMN_SCALES:
+            controls[f"column_x{scale}"] = u.inertia_aware_reference(
+                ref.fwd, ref.rev, L, S, ref.area_full, diameter, t, hw, tw, q_qs,
+                coeff_scale=scale)[0]
+    scored = {name: u.score_band(t, q, r, vref, plateaus, segments) for name, r in controls.items()}
+    res["controls_reference"] = {name: {k: v["violations"] for k, v in sc["segments"].items()}
+                                 for name, sc in scored.items()}
+    res["plateaus"] = scored["quasi_steady"]["plateaus"]     # a hold is steady: Q_qs is the physics
+    res["crossing_s"] = dict(coupler=u.crossing_time(t, q), column=u.crossing_time(t, qref),
+                             quasi_steady=u.crossing_time(t, q_qs))
     res["regimes"] = sorted({p[1] for p in pts})
     res["peak_hw_m"] = float(hw.max())
     res["startup_excluded_s"] = STARTUP_S
