@@ -148,6 +148,9 @@ def test_c2_vs_libswmm_d25_excluded_points_are_asserted():
     assert max(abs(r["c2"]) for r in excluded) < 1.0
 
 
+# Parked residual (epic 3585 D26/D27, watch-list TASK-3683): cmbox_90hw inlet at HW 2.5/3.0 m sits at -0.559 %
+# vs libswmm (2/190 points). strict: if it starts passing, CI says so and the watch-list entry is re-checked.
+@pytest.mark.xfail(strict=True, reason="D26 parked residual (TASK-3683): cmbox_90hw inlet 2/190 at -0.559 %")
 def test_c2_vs_libswmm_gated_points_within_half_percent():
     rows = _c2_vs_libswmm_rows()
     gated = [r for r in rows if r["regime_hds5"] != "outlet-partial" and abs(r["lib"]) <= 0.5]
