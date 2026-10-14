@@ -42,7 +42,8 @@ swmm = ["pyswmm>=2.1"]
 pipedream = [
     "pipedream-solver @ git+https://github.com/anuga-community/pipedream.git@anuga",
 ]
-test = ["pytest"]
+# scipy: the independent HDS-5 oracle in tests/_hds5_oracle.py (brentq); the engine itself avoids it.
+test = ["pytest", "scipy"]
 # Hydrograph viewer GUI (Tkinter is stdlib; numpy/pandas are core deps).
 viewer = ["matplotlib"]
 # Documentation (Sphinx + MyST), also pinned in docs/requirements.txt for RTD.
@@ -59,3 +60,8 @@ anuga-drainage-viewer = "anuga_drainage.viewer:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A bare `pytest` still runs everything; the push/PR CI lanes pass -m "not slow" and
+# .github/workflows/slow.yml runs -m slow on a schedule (TASK-3674).
+markers = [
+    "slow: long SWMM/ANUGA culvert gates (unsteady series, flume and bridge 2D runs; minutes each)",
+]
