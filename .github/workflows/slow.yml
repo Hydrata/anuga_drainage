@@ -1,0 +1,35 @@
+name: slow
+
+# The long culvert gates marked `slow` (TASK-3674): the 42 unsteady SWMM series and
+# three 2D flume runs of tests/test_inlet_control_unsteady.py (~10 min on 16 cores)
+# and the 2D bridge_hecras run (~3 min). The push/PR lanes (tests, pip, conda-env)
+# run `-m "not slow"`; this lane runs only the slow ones, on a schedule and on demand.
+# Rulesets / required checks for the fork belong to TASK-3668.
+
+on:
+  schedule:
+    - cron: "0 17 * * *"   # daily, 17:00 UTC
+  workflow_dispatch:
+
+jobs:
+  slow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ANUGA (PyPI wheel) + package and backends
+        run: |
+          python -m pip install --upgrade pip
+          pip install anuga==3.3.7
+          pip install -e .[swmm,pipedream,test]
+
+      - name: Run the slow lane
+        run: pytest -v -m slow

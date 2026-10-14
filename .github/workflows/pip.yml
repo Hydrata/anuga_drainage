@@ -55,4 +55,4 @@ jobs:
           PY
 
       - name: Run full test suite (with ANUGA)
-        run: pytest -v
+        run: pytest -v -m "not slow"   # the slow gates run in slow.yml (TASK-3674)

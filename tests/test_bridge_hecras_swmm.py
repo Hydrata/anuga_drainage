@@ -56,6 +56,7 @@ def hecras_metrics(out_dir):
     return {k: float(v[0]) for k, v in m.items()}
 
 
+@pytest.mark.slow          # ~3 min 2D run: the scheduled slow lane (TASK-3674)
 def test_bridge_hecras_swmm(tmp_path):
     assert os.path.exists(GAUGES), f"HEC-RAS gauges not found at {GAUGES} (set ANUGA_CORE_DIR)"
     res = run_bridge("swmm", tmp_path)

@@ -21,6 +21,9 @@ import pytest
 
 pytest.importorskip("pyswmm")
 
+# ~10 min (42 SWMM series + three 2D flume runs): its own scheduled CI lane (TASK-3674)
+pytestmark = pytest.mark.slow
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 

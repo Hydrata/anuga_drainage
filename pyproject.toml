@@ -59,3 +59,8 @@ anuga-drainage-viewer = "anuga_drainage.viewer:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A bare `pytest` still runs everything; the push/PR CI lanes pass -m "not slow" and
+# .github/workflows/slow.yml runs -m slow on a schedule (TASK-3674).
+markers = [
+    "slow: long SWMM/ANUGA culvert gates (unsteady series, flume and bridge 2D runs; minutes each)",
+]
