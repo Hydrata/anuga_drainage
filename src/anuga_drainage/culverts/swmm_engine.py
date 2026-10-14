@@ -33,7 +33,16 @@ state machine per culvert (``SwmmHeadwallEngine``):
 * q < 0 (beyond the direction deadband): ReverseBarrel hds5 losses, the O_HW stage floored at
   the brink (dc), O_TW at the plain 2D stage (no entrance-energy lowering: stacked on the
   reverse losses it under-delivers by 15-25 %, MEASURED);
-* leaving reverse restores the FORWARD losses (0, 0, 0), not the stock (ke, 1.0, 0).
+* leaving reverse restores the FORWARD losses (0, 0, 0), not the stock (ke, 1.0, 0);
+* q >= 0 with the barrel PRESSURISED (TASK-3691: pond AND tailwater at or over the crown where
+  the entrance energy would take its free-surface branch, see ``_pressurised``): the pond stage
+  on O_HW and the stock losses (Kentry ke, Kexit 1.0, Kavg 0), i.e. SWMM's full-pipe equation
+  = HDS-5 Eq 3.6b H - TW = (1 + ke + friction) V^2/2g. The entrance-energy depth is NOT used
+  there: below the crown it is a free-surface inlet next to a full outlet, a boundary pair on
+  which SWMM's undamped convective term holds a spurious supercritical barrel (flume box
+  2.4x1.5, Q 7, TW = D: 12.98 m3/s entering at y1 = dc with the downstream head 0.44 m higher;
+  the HDS-5 inlet cap then governs and the pond settles 0.10 m low; MEASURED, deploy spike
+  engine-proofs.md "TASK-3691").
 """
 from __future__ import annotations
 
@@ -403,6 +412,7 @@ class SwmmHeadwallEngine:
                                float(c.barrels), c.upstream_invert_m, c.downstream_invert_m,
                                ratings_for(c)[0])
         self._tw = {i: None for i in self._link}       # last imposed tailwater stage
+        self._press = {i: False for i in self._ee}       # forward state: pressurised barrel
         self.imposed = {}
         self.duration_s = int(duration_s)
         self.elapsed_s = 0
@@ -436,12 +446,40 @@ class SwmmHeadwallEngine:
         decelerates the column towards a reversal (floored, the decelerating column loses
         its losses and the flow crosses zero 4-6 s late, MEASURED 31/42 cases)."""
         ee, nb, inv_up, inv_dn, rate_f = self._ee[i]
-        q = self._rev[i].q / nb
+        pond, q = h - inv_up, self._rev[i].q / nb
+        cap = rate_f(pond)
+        if self._pressurised(i, ee, pond, w - inv_dn, min(max(q, 0.0), cap)):
+            return h
         if q <= 0.0:                            # not flowing forward (deadband / start)
             ee.reset()
             return h
-        y = ee.depth(h - inv_up, q, w - inv_dn, rate_f(h - inv_up))
+        y = ee.depth(pond, q, w - inv_dn, cap)
         return inv_up + y
+
+    def _pressurised(self, i, ee, pond, tail, q_gov):
+        """Forward state, TASK-3691: the PRESSURISED barrel, i.e. both ends at or over the crown
+        (pond depth ``pond``, tailwater depth ``tail``) where the entrance energy would take its
+        FREE-SURFACE branch (y_full = pond - (1 + ke) q^2/2gA_full^2 below the crown; ``q_gov``
+        is the last stride's per-barrel flow held to the inlet rating, as in EntranceEnergy).
+        Left when either end drops below (1 - FULL_BAND) x rise or y_full reaches
+        (1 + FULL_BAND) x rise (the entrance energy's own full branch, also a full pipe, takes
+        over). While pressurised SWMM gets the pond stage and the stock losses (Kentry ke,
+        Kexit 1.0), i.e. the full-pipe HDS-5 Eq 3.6b; on leaving, the entrance-energy losses
+        (0, 0, 0). Entering from the entrance energy's full branch is NOT done: both are full
+        pipes, and the swap costs a one-stride kick (MEASURED +2 % in 2/42 unsteady cases)."""
+        was = self._press[i]
+        rise, band = ee.rise, ee.FULL_BAND
+        y_full = pond - ee.k * q_gov * q_gov / (2.0 * G * ee.a_full * ee.a_full)
+        if was:
+            now = min(pond, tail) >= (1.0 - band) * rise and y_full < (1.0 + band) * rise
+        else:
+            free_surface = y_full < rise or (not ee.full and y_full < (1.0 + band) * rise)
+            now = min(pond, tail) >= rise and free_surface
+        if now != was:
+            self._press[i] = now
+            self._rev[i]._set(*((self.culverts[i].entrance.ke, 1.0) if now else (0.0, 0.0)), 0.0)
+            ee.reset()
+        return now
 
     def stride(self) -> None:
         """Advance SWMM by exactly one second, then run the direction/loss state machine."""
@@ -462,6 +500,7 @@ class SwmmHeadwallEngine:
             rev.update(self._link[i].flow, self._j_hw[i], self._tw[i])
             if was_reverse != rev.reverse and i in self._ee:
                 self._ee[i][0].reset()          # the forward depth restarts from the pond
+                self._press[i] = False          # reverse owns the losses; forward re-decides
 
     def flows(self) -> np.ndarray:
         """Conduit flow (m3/s, all barrels; + = inlet -> outlet); 0 for closed culverts."""
