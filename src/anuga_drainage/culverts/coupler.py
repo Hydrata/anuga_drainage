@@ -26,6 +26,15 @@ Design 1 (epic 3585 D6/D7, spike scope, host backend):
   swmm_engine.ReverseBarrel): while Q < 0 the imposed headwater stage is floored at the
   brink (invert + dc) and the conduit's loss coefficients follow the flow direction.
 
+* the recorded Q is the flow ANUGA ACTUALLY MOVED (TASK-3700): the signed volume the
+  losing end gave up in the step divided by the step, stamped at the END of the step it
+  covers; SWMM's request (after the inlet cap and smoothing) is kept beside it as
+  ``q_requested_m3s``. They differ only when the losing end holds less water than SWMM
+  asks for (a dry or thin-film exchange region), where the request never reached ANUGA.
+* the exchange regions' mean bed levels are measured ONCE, when the coupler is built;
+  anything that reshapes the ground there (run_anuga's D34 carve to the invert) must do
+  so BEFORE ``attach_culverts``.
+
 Sign convention: Q > 0 flows inlet -> outlet.
 """
 from __future__ import annotations
@@ -44,8 +53,9 @@ ENGINE_SWMM = "swmm"
 ENGINE_BOYD = "boyd-as-coded"
 ENGINES = (ENGINE_SWMM, ENGINE_BOYD)
 TIMESERIES_HEADER = ("time_s", "q_m3s", "hw_level_m", "tw_level_m")
-#: write_csv adds the governing control (barrel | inlet | reverse-inlet | n/a) as a last column.
-CSV_HEADER = TIMESERIES_HEADER + ("control",)
+#: write_csv adds the governing control (barrel | inlet | reverse-inlet | n/a) and the
+#: diagnostic SWMM request (``q_requested_m3s``, TASK-3700) after the run_anuga columns.
+CSV_HEADER = TIMESERIES_HEADER + ("control", "q_requested_m3s")
 
 
 def _as_culverts(culverts):
@@ -56,11 +66,12 @@ def _as_culverts(culverts):
 class _Series:
     def __init__(self):
         self.t, self.q, self.hw, self.tw, self.q_engine, self.control = [], [], [], [], [], []
+        self.q_requested = []
 
     def as_arrays(self):
         arrays = {k: np.asarray(v, dtype=float) for k, v in
                   dict(time_s=self.t, q_m3s=self.q, hw_level_m=self.hw, tw_level_m=self.tw,
-                       q_engine_m3s=self.q_engine).items()}
+                       q_engine_m3s=self.q_engine, q_requested_m3s=self.q_requested).items()}
         arrays["control"] = np.asarray(self.control, dtype=np.int8)
         return arrays
 
@@ -113,8 +124,9 @@ class CulvertSet:
         return [c.name for c in self.culverts]
 
     def timeseries(self, index):
-        """dict of numpy arrays: time_s, q_m3s, hw_level_m, tw_level_m, q_engine_m3s and
-        control (int8 index into CONTROL_NAMES: barrel, inlet, reverse-inlet, n/a)."""
+        """dict of numpy arrays: time_s, q_m3s (the flow actually moved), hw_level_m,
+        tw_level_m, q_engine_m3s (SWMM's own barrel flow), q_requested_m3s (the flow asked of
+        ANUGA) and control (int8 index into CONTROL_NAMES: barrel, inlet, reverse-inlet, n/a)."""
         return self.series[index].as_arrays()
 
     def peak_headwater(self, index):
@@ -123,7 +135,8 @@ class CulvertSet:
 
     def write_csv(self, directory):
         """One ``<name>.csv`` per culvert: run_anuga's TIMESERIES_HEADER columns plus
-        ``control`` (which control governed the sample: barrel | inlet | reverse-inlet)."""
+        ``control`` (which control governed the sample: barrel | inlet | reverse-inlet) and
+        ``q_requested_m3s`` (diagnostic: the flow asked of ANUGA; q_m3s is what moved)."""
         os.makedirs(directory, exist_ok=True)
         paths = []
         for i, c in enumerate(self.culverts):
@@ -132,8 +145,8 @@ class CulvertSet:
             with open(path, "w", newline="") as f:
                 w = csv.writer(f)
                 w.writerow(CSV_HEADER)
-                for row in zip(*(s[k] for k in TIMESERIES_HEADER), s["control"]):
-                    w.writerow([f"{v:.6g}" for v in row[:-1]] + [CONTROL_NAMES[int(row[-1])]])
+                for row in zip(*(s[k] for k in TIMESERIES_HEADER), s["control"], s["q_requested_m3s"]):
+                    w.writerow([f"{v:.6g}" for v in row[:4]] + [CONTROL_NAMES[int(row[4])], f"{row[5]:.6g}"])
             paths.append(path)
         return paths
 
@@ -196,6 +209,7 @@ class HeadwallCulvertCoupler(CulvertSet):
         self.q_held = np.zeros(n)          # barrel flow capped at the HDS-5 inlet rating
         self.control = [BARREL] * n        # what governed the last stride
         self.q_used = np.zeros(n)          # smoothed flow requested of ANUGA
+        self.q_moved = np.zeros(n)         # flow actually moved in the last step (signed)
         self.requested_volume = np.zeros(n)  # sum |Q| dt requested
         self.applied_volume = np.zeros(n)    # sum of volume actually moved (signed, + in->out)
         self.t0 = None
@@ -236,14 +250,18 @@ class HeadwallCulvertCoupler(CulvertSet):
             self.q_used = self.q_used + a * (self.q_held - self.q_used)
         else:
             self.q_used = self.q_held.copy()
+        q_req = np.zeros(n)
         for i, c in enumerate(self.culverts):
             q = 0.0 if c.closed else float(self.q_used[i])
+            q_req[i] = q
             self.requested_volume[i] += abs(q) * dt
             moved = self._exchange(i, q, dt)
             self.applied_volume[i] += moved
-        if t - self.t0 + 1e-9 >= self._next_record:
-            self._record(t - self.t0, hw, tw)
-            self._next_record = _next_sample(t - self.t0, self.record_every_s)
+            self.q_moved[i] = moved / dt
+        # The sample covers [t, t + dt]: stamped at its END, with the stages that drove it.
+        if rel_end + 1e-9 >= self._next_record:
+            self._record(rel_end, hw, tw, q_req)
+            self._next_record = _next_sample(rel_end, self.record_every_s)
 
     def _accumulate(self, raw, cap_f, cap_r, q_acc, raw_acc):
         """Add one stride's flows: SWMM's own (``raw_acc``) and the inlet-controlled ones
@@ -285,10 +303,11 @@ class HeadwallCulvertCoupler(CulvertSet):
         ux, uy = c.outward_direction("outlet" if toward_outlet else "inlet")
         return [v * ux, v * uy]
 
-    def _record(self, t, hw, tw):
+    def _record(self, t, hw, tw, q_requested):
         for i, s in enumerate(self.series):
             s.t.append(t)
-            s.q.append(float(self.q_used[i]))
+            s.q.append(float(self.q_moved[i]))
+            s.q_requested.append(float(q_requested[i]))
             s.hw.append(float(hw[i]))
             s.tw.append(float(tw[i]))
             s.q_engine.append(float(self.q_raw[i]))
@@ -318,8 +337,8 @@ def _CouplerOperator(domain, coupler, label):
             return f"Headwall culvert coupler: {len(self.coupler.culverts)} culvert(s)"
 
         def timestepping_statistics(self):
-            q = ", ".join(f"{v:.3f}" for v in self.coupler.q_used[:5])
-            return f"Headwall culverts Q[:5] = [{q}] m3/s"
+            q = ", ".join(f"{v:.3f}" for v in self.coupler.q_moved[:5])
+            return f"Headwall culverts Q moved[:5] = [{q}] m3/s"
 
     return HeadwallCulvertOperator()
 
@@ -367,6 +386,7 @@ class BoydAsCodedCulverts(CulvertSet):
             s.hw.append(float(hw))
             s.tw.append(float(tw))
             s.q_engine.append(float(op.discharge))
+            s.q_requested.append(float(op.discharge))
             s.control.append(NOT_TRACKED)
 
 

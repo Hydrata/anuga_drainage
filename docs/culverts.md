@@ -75,13 +75,18 @@ SWMM culvert code and Ke.
 
 Both engines return a `CulvertSet`:
 
-- `cs.timeseries(i)` -> dict of numpy arrays `time_s`, `q_m3s` (Q applied to
-  ANUGA, + = inlet -> outlet), `hw_level_m`, `tw_level_m` (end stages),
-  `q_engine_m3s` (SWMM's own barrel flow before the inlet-control cap; = `q_m3s` for Boyd). Sampled every
-  `record_every_s` of model time (relative to the attach time).
+- `cs.timeseries(i)` -> dict of numpy arrays `time_s`, `q_m3s` (the flow ANUGA
+  actually MOVED: the signed volume the losing end gave up in the step / the step,
+  + = inlet -> outlet), `hw_level_m`, `tw_level_m` (the end stages that drove the step),
+  `q_requested_m3s` (diagnostic: the flow asked of ANUGA after the inlet cap and smoothing;
+  larger than `q_m3s` only when the losing end held less water than asked),
+  `q_engine_m3s` (SWMM's own barrel flow before the inlet-control cap; both = `q_m3s` for Boyd).
+  Sampled every `record_every_s` of model time (relative to the attach time); each
+  SWMM-engine sample is stamped at the END of the ANUGA step it covers (TASK-3700).
 - `cs.peak_headwater(i)`; `cs.names()`.
 - `cs.write_csv(directory)` -> one CSV per culvert with run_anuga's
-  `TIMESERIES_HEADER` (`time_s, q_m3s, hw_level_m, tw_level_m`) plus `control`.
+  `TIMESERIES_HEADER` (`time_s, q_m3s, hw_level_m, tw_level_m`) plus `control` and
+  `q_requested_m3s`.
 - `cs.timeseries(i)["control"]` (int8, index into `CONTROL_NAMES` = barrel,
   inlet, reverse-inlet, n/a) says which control governed each sample; `write_csv`
   adds it as a last `control` column (`n/a` for Boyd).

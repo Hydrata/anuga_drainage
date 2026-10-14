@@ -245,7 +245,8 @@ def test_headwall_series_csv_has_control_column(tmp_path):
         (path,) = list(series.iterdir())
         with open(path) as f:
             rows = list(csv.DictReader(f))
-        assert list(rows[0]) == ["time_s", "q_m3s", "hw_level_m", "tw_level_m", "control"]
+        assert list(rows[0]) == ["time_s", "q_m3s", "hw_level_m", "tw_level_m", "control",
+                                "q_requested_m3s"]
         assert len(rows) >= 30 and {row["control"] for row in rows} <= allowed
         if engine == "swmm":
             assert {row["control"] for row in rows} & {"barrel", "inlet"}
