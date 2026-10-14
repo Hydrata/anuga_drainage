@@ -197,7 +197,8 @@ def flume_runs(tmp_path_factory):
 
 def test_headwall_mode1_mode2_peak_hw_within_1mm(flume_runs):
     m1, m2 = flume_runs[1], flume_runs[2]
-    assert m2["cpu_sync_bracket"] is True        # design 1: the coupler forces the host bracket
+    if m2["has_sync_bracket_api"]:               # ANUGA 4 (Hydrata engine); PyPI anuga 3.3.7 has no device path
+        assert m2["cpu_sync_bracket"] is True    # design 1: the coupler forces the host bracket
     assert m1["peak_hw"] > 0.3                   # the culvert really ran surcharged-ish
     assert abs(m1["peak_hw"] - m2["peak_hw"]) <= 0.001
 

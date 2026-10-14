@@ -96,6 +96,7 @@ def run(mode, engine, final_time, workdir, *, diameter=DEFAULT_DIAMETER, inflow_
                peak_q=float(np.max(s["q_m3s"])), v0=v0, v1=v1,
                inflow=float(inflow.total_applied_volume),
                cpu_sync_bracket=bool(getattr(domain, "_cached_has_cpu_only_ops", False)),
+               has_sync_bracket_api=hasattr(domain, "_cached_has_cpu_only_ops"),
                n_records=int(s["time_s"].size), **extra)
     if engine == "swmm":
         out.update(requested=float(cs.requested_volume[0]), applied=float(cs.applied_volume[0]),
