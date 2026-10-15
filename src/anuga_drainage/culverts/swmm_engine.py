@@ -68,6 +68,13 @@ RECT_ALFMAX = 0.97
 _DC_POINTS = 400
 #: SWMM [OPTIONS] INERTIAL_DAMPING values; the default (written nowhere) is PARTIAL
 INERTIAL_DAMPING = ("NONE", "PARTIAL", "FULL")
+#: pyswmm 2.x ``SystemStats.routing_stats`` reports the flow volumes in the model's units (m3
+#: under CMS) but the storage in ft3; :func:`mass_continuity` checks which by reproducing
+#: SWMM's own routing error.
+FT3_TO_M3 = 0.028316846592
+_ROUTING_INFLOWS = ("dry_weather_inflow", "wet_weather_inflow", "groundwater_inflow",
+                    "II_inflow", "external_inflow")
+_ROUTING_LOSSES = ("flooding", "evaporation_loss", "seepage_loss")
 
 
 class EntranceEnergy:
@@ -418,6 +425,8 @@ class SwmmHeadwallEngine:
         self.elapsed_s = 0
         self.closed = False
         self.routing_error_pct = None
+        self.mass_balance = None
+        self._outfall_end0 = self.outfall_end_volume()
 
     def set_stages(self, hw, tw) -> None:
         """Impose 2D headwater/tailwater STAGES (m, absolute) on every open culvert.
@@ -515,10 +524,39 @@ class SwmmHeadwallEngine:
             h[i] = node.head
         return h
 
+    def outfall_end_volume(self) -> float:
+        """Water standing in the OUTFALL ends of the conduits now (m3, all culverts).
+
+        Under dynamic wave a conduit's volume is built from its end depths, half to each end
+        node, and an outfall does no continuity: the outfall half fills (or empties) with the
+        imposed stage without any booked inflow (TASK-3717). Per culvert: the barrel half at
+        O_TW (barrels x A(y_O_TW) x L / 2, the flow area after blockage) plus the approach
+        dummy's half at O_HW (w x y_O_HW x L_dummy / 2). Depths are SWMM's own node depths,
+        capped at the section's rise. Pure geometry: it cannot see a flow, so it cannot
+        absorb a loss (see :func:`mass_continuity`)."""
+        vol = 0.0
+        for i in self._link:
+            c = self.culverts[i]
+            shape, g1, g2 = c.effective_geometry
+            geom = _geometry(shape, g1, g2)
+            y = min(max(self._o_tw[i].depth, 0.0), geom.rise)
+            vol += float(c.barrels) * geom.area(y) * float(c.length_m) / 2.0
+            dl, dh, dw = self.layout.dummies[i]
+            vol += dw * min(max(self._o_hw[i].depth, 0.0), dh) * dl / 2.0
+        return vol
+
     def close(self):
         """Finish the run; returns SWMM's flow-routing continuity error (%), read
-        from the .rpt ("Flow Routing Continuity" block), or None if absent."""
+        from the .rpt ("Flow Routing Continuity" block), or None if absent.
+
+        Also sets ``mass_balance`` (TASK-3741, :func:`mass_continuity`): the barrels' water
+        ledger with the outfall-end water counted, whose ``mass_error_pct`` is the
+        continuity figure to judge the engine by."""
         if not self.closed:
+            from pyswmm import SystemStats
+
+            self.mass_balance = mass_continuity(SystemStats(self.sim).routing_stats,
+                                                self._outfall_end0, self.outfall_end_volume())
             self.sim.report()
             self.sim.close()
             self.closed = True
@@ -528,6 +566,60 @@ class SwmmHeadwallEngine:
     @property
     def rpt_path(self):
         return os.path.splitext(self.inp_path)[0] + ".rpt"
+
+
+def mass_continuity(stats, outfall_end_initial_m3, outfall_end_final_m3):
+    """The barrels' continuity judged by MASS (TASK-3741, operator ruling D36 on gate 637).
+
+    SWMM's flow-routing error is ``100 (V_in + S_0 - V_out - V_loss - S_1) / (V_in + S_0)``
+    (V_in: booked inflows, V_out: outfall outflow, V_loss: flooding + evaporation + seepage,
+    S: stored volume). For this engine it is not a mass figure: the outfall ends of the
+    conduits fill from the IMPOSED stages with no booked inflow (``outfall_end_volume``),
+    so a run that stops with a risen tailwater reads that water as an error (prod run
+    1590 replayed: SWMM -22.16 %, by mass +0.01 %).
+
+    The mass figure counts the change in the outfall-end water W as water that came in (or
+    left) through the outfall it stands at, and books every loss SWMM records as an ERROR,
+    not an outflow: the barrels exchange water with the flood model at their two ends only,
+    so water leaving them any other way is water lost::
+
+        mass_error_pct = 100 (V_in + (W_1 - W_0) - V_out - (S_1 - S_0)) / (V_in + S_0)
+
+    Same sign and denominator as SWMM's (positive = more came in than went out or stayed),
+    so the two differ only by the outfall-end change and the losses. W is geometry at the
+    outfall node depths (it cannot see a flow), so a genuine loss or gain, booked or not,
+    moves the mass figure one for one (fork tests/test_swmm_continuity.py, negative control).
+
+    ``stats``: pyswmm ``SystemStats.routing_stats`` read before the simulation closes.
+    Returns a dict of m3 volumes, ``swmm_error_pct`` (recomputed from the same volumes,
+    equal to the .rpt's to its rounding), ``mass_error_pct`` (None if nothing entered) and
+    ``storage_units`` (which unit pyswmm reported the storage in).
+    """
+    v_in = sum(float(stats.get(k, 0.0)) for k in _ROUTING_INFLOWS)
+    v_out = float(stats.get("outflow", 0.0))
+    v_loss = sum(float(stats.get(k, 0.0)) for k in _ROUTING_LOSSES)
+
+    def raw_pct(scale):
+        s0 = float(stats.get("initial_storage", 0.0)) * scale
+        s1 = float(stats.get("final_storage", 0.0)) * scale
+        den = v_in + s0
+        return 100.0 * (den - v_out - v_loss - s1) / den if den > 0.0 else None
+
+    # pyswmm 2.x: storage in ft3; take the unit that reproduces SWMM's own error
+    reported = stats.get("routing_error")
+    scale, units = FT3_TO_M3, "ft3"
+    as_ft3, as_m3 = raw_pct(FT3_TO_M3), raw_pct(1.0)
+    if None not in (reported, as_ft3, as_m3) and abs(as_m3 - reported) < abs(as_ft3 - reported):
+        scale, units = 1.0, "m3"
+    s0 = float(stats.get("initial_storage", 0.0)) * scale
+    s1 = float(stats.get("final_storage", 0.0)) * scale
+    w0, w1 = float(outfall_end_initial_m3), float(outfall_end_final_m3)
+    den = v_in + s0
+    mass = 100.0 * (v_in + (w1 - w0) - v_out - (s1 - s0)) / den if den > 0.0 else None
+    return dict(inflow_m3=v_in, outflow_m3=v_out, losses_m3=v_loss, initial_stored_m3=s0,
+                final_stored_m3=s1, initial_outfall_end_m3=w0, final_outfall_end_m3=w1,
+                denominator_m3=den, swmm_error_pct=raw_pct(scale), mass_error_pct=mass,
+                storage_units=units)
 
 
 def routing_error_from_rpt(path):
