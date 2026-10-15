@@ -314,8 +314,17 @@ class HeadwallCulvertCoupler(CulvertSet):
             s.control.append(self.control[i])
 
     def finalize(self):
-        """Close SWMM; returns {'swmm_routing_error_pct': float}."""
-        return {"swmm_routing_error_pct": self.engine_swmm.close()}
+        """Close SWMM; returns {'swmm_routing_error_pct': SWMM's own % (.rpt),
+        'swmm_mass_error_pct': the barrels' continuity judged by mass,
+        'swmm_mass_balance': its ledger in m3} (swmm_engine.mass_continuity, TASK-3741).
+
+        The mass figure is the one to gate on: SWMM's % also counts the water the imposed
+        outfall stages stand in the conduits' outfall ends as an error."""
+        error = self.engine_swmm.close()
+        balance = dict(self.engine_swmm.mass_balance or {})
+        return {"swmm_routing_error_pct": error,
+                "swmm_mass_error_pct": balance.get("mass_error_pct"),
+                "swmm_mass_balance": balance}
 
 
 def _CouplerOperator(domain, coupler, label):

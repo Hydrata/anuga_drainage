@@ -77,6 +77,9 @@ class InpNames:
 class InpLayout:
     path: str
     names: dict = field(default_factory=dict)   # culvert index -> InpNames (open culverts only)
+    #: culvert index -> (length_m, height_m, width_m) of its approach dummy conduit (TASK-3741:
+    #: the engine's mass continuity counts the water standing in its outfall end)
+    dummies: dict = field(default_factory=dict)
 
 
 def _hms(seconds: int) -> str:
@@ -142,6 +145,7 @@ def write_inp(culverts, path, *, duration_s=7 * 86400, routing_step=0.25,
             dl, (dh, dw) = DUMMY_LENGTH_M, dummy_size(c)
         else:
             dl, dh, dw = dummy(c)
+        layout.dummies[i] = (float(dl), float(dh), float(dw))
         shape, g1, g2 = c.effective_geometry
         e = c.entrance
         hw0, tw0 = c.upstream_invert_m, c.downstream_invert_m

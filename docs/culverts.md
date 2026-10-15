@@ -30,7 +30,7 @@ cs = attach_culverts(domain, culverts, engine="swmm", workdir="out/culverts_swmm
                      duration_s=6 * 3600)          # SWMM END_TIME; must cover the run
 for t in domain.evolve(yieldstep=60, finaltime=6 * 3600):
     pass
-info = cs.finalize()        # closes SWMM; {'swmm_routing_error_pct': ...}
+info = cs.finalize()        # closes SWMM; {'swmm_routing_error_pct', 'swmm_mass_error_pct', 'swmm_mass_balance'}
 ```
 
 Call `attach_culverts` after the domain's elevation and initial stage are set
@@ -92,7 +92,10 @@ Both engines return a `CulvertSet`:
   adds it as a last `control` column (`n/a` for Boyd).
 - SWMM engine only: `cs.requested_volume[i]` (sum of |Q| dt asked of ANUGA),
   `cs.applied_volume[i]` (signed volume actually moved), `cs.finalize()`
-  returns SWMM's flow-routing continuity error read from the .rpt.
+  returns SWMM's flow-routing continuity error read from the .rpt
+  (`swmm_routing_error_pct`) and the barrels' continuity judged by MASS
+  (`swmm_mass_error_pct`, ledger in `swmm_mass_balance`; see "Continuity" below).
+  Gate on the mass figure.
 
 For Boyd the HW/TW are the enquiry-point stages (`get_enquiry_stages()`),
 for SWMM they are the exchange-region stages below.
@@ -168,6 +171,30 @@ Q internally, so SWMM's own barrel diagnostics (velocity, depth, Froude, continu
 not those of the applied flow. Pipe NETWORKS will need the patched-library route
 (scripts/swmm-patches/ in the spike folder) instead.
 
+## Continuity (judged by mass)
+
+Both ends of every culvert are FIXED-stage outfalls driven by the 2D stages, and an
+outfall does no continuity, so the outfall half of each conduit (the barrel's at O_TW,
+the approach dummy's at O_HW) fills and empties with the imposed stage without any booked
+inflow or outflow. SWMM's flow-routing error therefore reads the water standing in a
+barrel's outlet end when the run stops as an error: a run that stops with a risen outlet
+pond reads strongly negative (-22 % on a 256 m box whose outlet pond rose 0.64 m), a
+falling one positive, with no water lost or created.
+
+`SwmmHeadwallEngine.close()` also sets `mass_balance` (`swmm_engine.mass_continuity`):
+
+    mass_error_pct = 100 (V_in + (W_1 - W_0) - V_out - (S_1 - S_0)) / (V_in + S_0)
+
+with W the outfall-end water (`outfall_end_volume()`: barrels x A(y_O_TW) x L / 2 plus
+the dummy's w x y_O_HW x L_d / 2, at SWMM's node depths), V_in SWMM's booked inflows,
+V_out its outfall outflow and S its stored volume. Losses SWMM books (flooding,
+evaporation, seepage) are NOT counted as outflow: the barrels exchange water with the flood
+model at their two ends only, so water leaving any other way counts as an error. W is
+geometry, so a real loss moves the figure one for one (`tests/test_swmm_continuity.py`:
+a 0.64 m tailwater rise reads -45 % raw and +0.26 % by mass; wall seepage of 34 m3 of
+397 m3 moves the mass figure to +8.8 %). The coupler is mass-exact for ANUGA by
+construction (`_exchange`); this figure checks SWMM's barrel model.
+
 ## Limits (spike)
 
 - No MPI: `distribute()`d domains raise `NotImplementedError` (master-rank
@@ -182,5 +209,6 @@ not those of the applied flow. Pipe NETWORKS will need the patched-library route
   partly-full barrels where HDS-5's outlet-control march and SWMM's dynamic wave
   differ, (c) in the steady reverse plateau of long barrels.
 - SWMM's own continuity report includes a forcing artefact: each imposed
-  outfall stage changes the barrel's stored volume without a matching flow.
+  outfall stage changes the barrel's stored volume without a matching flow
+  (see "Continuity" below for the figure to use instead).
 - `pyswmm` must be installed (`pip install -e .[swmm]`).

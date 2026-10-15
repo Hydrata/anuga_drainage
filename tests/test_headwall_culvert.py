@@ -203,6 +203,27 @@ def test_headwall_mode1_mode2_peak_hw_within_1mm(flume_runs):
     assert abs(m1["peak_hw"] - m2["peak_hw"]) <= 0.001
 
 
+def test_headwall_finalize_reports_the_mass_continuity(flume_runs):
+    """TASK-3741: finalize carries SWMM's raw % (unchanged key) AND the mass figure with its
+    ledger, and the two differ by exactly the outfall-end change (no booked losses here).
+
+    The flume starts DRY: the bore reaching the inlet lifts the imposed headwater ~0.5 m in
+    one stride, and SWMM's wide approach dummy books ~600 m3 in and most of it back out in
+    that second with a one-off residual of ~-87 m3 (constant to 0.1 m3 for the rest of the
+    run, MEASURED, deploy spike engine-proofs.md "TASK-3741"). That is a real SWMM-internal
+    error the mass figure must SHOW (about -12 %), not an outfall-end artefact, so no
+    "< 1 %" is asserted on this flume."""
+    for r in flume_runs.values():
+        assert isinstance(r["swmm_routing_error_pct"], float)
+        mb = r["swmm_mass_balance"]
+        assert r["swmm_mass_error_pct"] == mb["mass_error_pct"]
+        assert mb["inflow_m3"] > 10.0 and mb["losses_m3"] == 0.0, mb
+        assert mb["swmm_error_pct"] == pytest.approx(r["swmm_routing_error_pct"], abs=0.01), mb
+        dw = mb["final_outfall_end_m3"] - mb["initial_outfall_end_m3"]
+        assert mb["mass_error_pct"] == pytest.approx(
+            mb["swmm_error_pct"] + 100.0 * dw / mb["denominator_m3"], abs=1e-9), mb
+
+
 def test_headwall_flume_volume_exact(flume_runs):
     for r in flume_runs.values():
         # every m3 drawn at the inlet arrives at the outlet, and nothing was clipped here
