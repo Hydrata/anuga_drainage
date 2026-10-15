@@ -3,13 +3,19 @@ name: slow
 # The long culvert gates marked `slow` (TASK-3674): the 42 unsteady SWMM series and
 # three 2D flume runs of tests/test_inlet_control_unsteady.py (~10 min on 16 cores)
 # and the 2D bridge_hecras run (~3 min). The push/PR lanes (tests, pip, conda-env)
-# run `-m "not slow"`; this lane runs only the slow ones, on a schedule and on demand.
-# Scheduled-only, so it is not a ruleset required check (TASK-3668); parked D26 reds are xfail(strict).
+# run `-m "not slow"`; this lane runs only the slow ones, on a schedule, on demand, and on
+# PRs that change its own install path.
+# Path-filtered, so it is not a ruleset required check (TASK-3668); parked D26 reds are xfail(strict).
 
 on:
   schedule:
     - cron: "0 17 * * *"   # daily, 17:00 UTC
   workflow_dispatch:
+  # A PR that changes how this lane installs its engine proves it here before merge (TASK-3668).
+  pull_request:
+    paths:
+      - .github/workflows/slow.yml
+      - .github/actions/install-anuga-core/**
 
 jobs:
   slow:
