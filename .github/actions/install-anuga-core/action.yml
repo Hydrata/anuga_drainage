@@ -1,0 +1,70 @@
+name: Install the Hydrata anuga_core fork (SHA-pinned)
+description: >
+  Checks out Hydrata/anuga_core at the ONE pinned SHA (into ./anuga_core) and pip-installs it,
+  so CI tests this package against the engine hydrata.com actually runs, not PyPI/conda ANUGA 3.3.x
+  (TASK-3668). The build mirrors run_anuga's batch/Dockerfile cpu stage and anuga_core's own CI:
+  meson-python with --no-build-isolation, cython<3.3. The built wheel is cached per SHA + Python.
+  Exposes ANUGA_CORE_DIR (the checkout; the slow lane reads the bridge_hecras gauges from it).
+
+inputs:
+  sha:
+    description: >
+      Hydrata/anuga_core commit. KEEP IN SYNC with ARG ANUGA_CORE_SHA in Hydrata/run_anuga
+      batch/Dockerfile (the prod engine pin; 93368189 = gpu-run-anuga-f2ddf27-main-93368189).
+    default: 93368189eb35eef847094dde027d6d6dcb2b0059
+outputs:
+  core-dir:
+    description: Absolute path of the anuga_core checkout.
+    value: ${{ steps.dir.outputs.core-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check out Hydrata/anuga_core at the pin
+      uses: actions/checkout@v4
+      with:
+        repository: Hydrata/anuga_core
+        ref: ${{ inputs.sha }}
+        path: anuga_core
+        fetch-depth: 1
+        persist-credentials: false
+
+    - id: dir
+      shell: bash
+      run: |
+        echo "core-dir=$GITHUB_WORKSPACE/anuga_core" >> "$GITHUB_OUTPUT"
+        echo "ANUGA_CORE_DIR=$GITHUB_WORKSPACE/anuga_core" >> "$GITHUB_ENV"
+        echo "py=$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" >> "$GITHUB_OUTPUT"
+
+    - name: Cache the anuga_core wheel
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: anuga-wheelhouse
+        key: anuga-core-wheel-${{ runner.os }}-py${{ steps.dir.outputs.py }}-${{ inputs.sha }}
+
+    - name: Build the anuga_core wheel (cache miss)
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq build-essential gfortran libopenmpi-dev
+        python -m pip install --upgrade pip
+        # cython<3.3: 3.3.0 rejects the fork's sparse_matrix_ext.pyx dict-view assignments (TASK-2863).
+        pip install "numpy>=2.0" "cython<3.3" pybind11 meson ninja meson-python
+        # No .git history in a depth-1 checkout: feed the version like the Dockerfile does (TASK-2700).
+        ANUGA_VERSION="0.0.0+g${{ inputs.sha }}" \
+          pip wheel --no-build-isolation --no-deps ./anuga_core -w anuga-wheelhouse
+
+    - name: Install the anuga_core wheel
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        pip install anuga-wheelhouse/anuga-*.whl
+        python - <<'PY'
+        import anuga
+        v = anuga.__version__
+        sha = "${{ inputs.sha }}"
+        print("anuga", v, anuga.__file__)
+        assert ("g" + sha[:8]) in v, f"installed anuga {v} is not the pinned fork {sha}"
+        PY
