@@ -3,8 +3,12 @@
 Design 1 (epic 3585 D6/D7, spike scope, host backend):
 
 * one operator registered on the domain; ANUGA calls it every internal step;
-* end stages are read on the HOST: stage = volume / area + area-weighted mean
-  bed level of each exchange region (in mode 2 the operator is not on the
+* end stages are read on the HOST as the LEVEL-FILL stage of each exchange
+  region: the level at which the region's water volume fills its own ground
+  (TASK-3771; equal to volume / area + area-weighted mean bed on a flat region,
+  the lowest ground when dry), so a region spanning a creek bed and the
+  embankment beside it reads the water level, not one biased up by the dry
+  embankment (in mode 2 the operator is not on the
   GPU-safe whitelist, so ``apply_fractional_steps`` syncs the host copy before
   the operator loop and pushes it back after; no device backend is needed);
 * SWMM advances in whole 1 s strides whenever the ANUGA step end passes the
@@ -76,9 +80,35 @@ class _Series:
         return arrays
 
 
-def _region_stage(inlet, mean_bed):
-    area = inlet.get_area()
-    return inlet.get_total_water_volume() / area + mean_bed
+class LevelFill:
+    """Stage from volume over one exchange region's own ground (TASK-3771).
+
+    The ground is static once the coupler is built (run_anuga carves before it), so the
+    cells are sorted once. ``stage(volume)`` is the level L with
+    sum(area_i * max(L - z_i, 0)) = volume: continuous and increasing in the volume,
+    the lowest ground at zero volume, and exactly volume / area + area-weighted mean bed
+    once every cell is under water (always so on a flat or carved-flat region, which is
+    the stage the coupler read before TASK-3771).
+    """
+
+    def __init__(self, elevations, areas):
+        order = np.argsort(np.asarray(elevations, dtype=float), kind="stable")
+        self.z = np.asarray(elevations, dtype=float)[order]
+        self.cum_a = np.cumsum(np.asarray(areas, dtype=float)[order])
+        self.cum_az = np.cumsum(np.asarray(areas, dtype=float)[order] * self.z)
+        # volume needed to bring the level up to each sorted cell's ground
+        self.v_at = self.cum_a * self.z - self.cum_az
+        self.mean_bed = float(self.cum_az[-1] / self.cum_a[-1])
+
+    def stage(self, volume):
+        volume = max(float(volume), 0.0)
+        k = int(np.searchsorted(self.v_at, volume, side="right")) - 1
+        k = min(max(k, 0), len(self.z) - 1)
+        return float((volume + self.cum_az[k]) / self.cum_a[k])
+
+
+def _region_stage(inlet, fill):
+    return fill.stage(inlet.get_total_water_volume())
 
 
 #: Stage below bed by less than this (m) is float noise on a dry cell.
@@ -185,10 +215,10 @@ class HeadwallCulvertCoupler(CulvertSet):
         if duration_s is None:
             duration_s = 7 * 86400
         n = len(self.culverts)
-        self.ops_in, self.ops_out, self.bed_in, self.bed_out = [], [], np.zeros(n), np.zeros(n)
+        self.ops_in, self.ops_out, self.fill_in, self.fill_out = [], [], [], []
         for i, c in enumerate(self.culverts):
-            for end, ops, bed in (("inlet", self.ops_in, self.bed_in),
-                                  ("outlet", self.ops_out, self.bed_out)):
+            for end, ops, fills in (("inlet", self.ops_in, self.fill_in),
+                                    ("outlet", self.ops_out, self.fill_out)):
                 region = anuga.Region(domain, polygon=c.exchange_polygon(end))
                 if len(region.indices) == 0:
                     raise ValueError(f"culvert {c.name!r}: the {end} exchange region holds "
@@ -198,7 +228,7 @@ class HeadwallCulvertCoupler(CulvertSet):
                 domain.fractional_step_operators.remove(op)
                 ops.append(op)
                 inl = op.inlet
-                bed[i] = float(np.sum(inl.get_elevations() * inl.get_areas()) / inl.get_area())
+                fills.append(LevelFill(inl.get_elevations(), inl.get_areas()))
         hw0, tw0 = self.stages()
         self.engine_swmm = SwmmHeadwallEngine(self.culverts, workdir, duration_s=duration_s,
                                               routing_step=routing_step,
@@ -218,8 +248,8 @@ class HeadwallCulvertCoupler(CulvertSet):
 
     # ---------------------------------------------------------------- per step
     def stages(self):
-        hw = np.array([_region_stage(op.inlet, b) for op, b in zip(self.ops_in, self.bed_in)])
-        tw = np.array([_region_stage(op.inlet, b) for op, b in zip(self.ops_out, self.bed_out)])
+        hw = np.array([_region_stage(op.inlet, f) for op, f in zip(self.ops_in, self.fill_in)])
+        tw = np.array([_region_stage(op.inlet, f) for op, f in zip(self.ops_out, self.fill_out)])
         return hw, tw
 
     def step(self):
