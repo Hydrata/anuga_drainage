@@ -17,11 +17,15 @@ Design 1 (epic 3585 D6/D7, spike scope, host backend):
 * Q is exchanged through two stock ``Inlet_operator``s per culvert, which the
   coupler calls itself (they are taken off the domain's operator list): the
   losing end is drawn down first, its request clipped to the water present,
-  and exactly the volume it gave up is added at the other end (mass exact);
+  and exactly the volume it gave up is added at the other end (mass exact).
+  The losing end is drawn down to a FLAT water surface (drawdown.withdraw,
+  TASK-3771), not by the stock operator's uniform-depth ``set_depths``, which on a
+  region spanning a creek bed and its bank lifted the bank water above the road
+  crest; the gaining end is filled by the stock ``set_stages_evenly``;
 * anti-oscillation (TASK-3771): the request is also capped at EQUALISATION_FACTOR x the
   volume that would bring the two regions' level-fill stages level, so a step never
   overshoots the level and nothing moves against the head, EXCEPT SWMM's own barrel flow (its
-  water-column inertia), so by default the cap removes only what the coupler's smoothing adds
+  water-column inertia) while the adverse head is at most INERTIA_MAX_ADVERSE_HEAD_M, so by default the cap removes only what the coupler's smoothing adds
   on top of SWMM (the smoothed flow lags the head; uncapped, it drove the bridges' 53 s
   slosh); ``equalisation_strict=True`` caps SWMM's own flow too;
 * MPI (``distribute``) is NOT supported in the spike: the master-rank gather
@@ -55,6 +59,7 @@ import os
 
 import numpy as np
 
+from .drawdown import withdraw
 from .inlet_control import BARREL, CONTROL_NAMES, NOT_TRACKED, InletControl
 from .spec import HeadwallCulvert
 from .swmm_engine import SwmmHeadwallEngine
@@ -169,6 +174,28 @@ def limit_transfer(want, v_eq, factor, inertia=0.0):
     return min(want, max(factor * max(v_eq, 0.0), max(float(inertia), 0.0)))
 
 
+#: TASK-3771: SWMM's own barrel flow may run on against the head (water-column inertia: the
+#: flume's decelerating barrel flows ~6 s past the head reversal) only while the ADVERSE head
+#: (receiving end's level-fill stage minus the giving end's) is at most this many metres.
+#: Beyond it the flow is capped like the rest (nothing against the head): on Towradgi the
+#: uncapped allowance moved 141 m3/s against a 0.79 m adverse head (Northern Distributor).
+INERTIA_MAX_ADVERSE_HEAD_M = 0.05
+
+
+def inertia_floor(q_swmm, q, dt, adverse_head, max_adverse_head=INERTIA_MAX_ADVERSE_HEAD_M,
+                  strict=False):
+    """The volume SWMM's own barrel flow ``q_swmm`` may move in a step of ``dt`` regardless of
+    the equalisation cap (see limit_transfer): ``|q_swmm| dt`` when it runs the same way as
+    the request ``q`` and the adverse head (m; > 0 means the transfer runs against the head)
+    is at most ``max_adverse_head``, else 0. ``max_adverse_head=None`` drops the head limit
+    (the 1400a90 behaviour); ``strict=True`` is always 0."""
+    if strict or not q_swmm * q > 0.0:
+        return 0.0
+    if max_adverse_head is not None and adverse_head > max_adverse_head:
+        return 0.0
+    return abs(float(q_swmm)) * float(dt)
+
+
 def _region_stage(inlet, fill):
     return fill.stage(inlet.get_total_water_volume())
 
@@ -263,7 +290,8 @@ class HeadwallCulvertCoupler(CulvertSet):
     def __init__(self, domain, culverts, workdir, *, duration_s=None, routing_step=0.25,
                  smoothing_timescale=0.0, use_momentum_jet=False, record_every_s=1.0,
                  extra_options=None, label="headwall_culverts",
-                 equalisation_factor=EQUALISATION_FACTOR, equalisation_strict=False):
+                 equalisation_factor=EQUALISATION_FACTOR, equalisation_strict=False,
+                 inertia_max_adverse_head_m=INERTIA_MAX_ADVERSE_HEAD_M):
         import anuga
 
         if getattr(domain, "numproc", 1) > 1:
@@ -276,6 +304,8 @@ class HeadwallCulvertCoupler(CulvertSet):
         self.equalisation_factor = (None if equalisation_factor is None
                                     else float(equalisation_factor))
         self.equalisation_strict = bool(equalisation_strict)
+        self.inertia_max_adverse_head_m = (None if inertia_max_adverse_head_m is None
+                                           else float(inertia_max_adverse_head_m))
         self.use_momentum_jet = bool(use_momentum_jet)
         self.record_every_s = float(record_every_s)
         if duration_s is None:
@@ -384,23 +414,22 @@ class HeadwallCulvertCoupler(CulvertSet):
         if self.equalisation_factor is not None and want > 0.0:
             fill_src, fill_dst = ((self.fill_in[i], self.fill_out[i]) if q > 0
                                   else (self.fill_out[i], self.fill_in[i]))
-            v_eq = equalising_volume(fill_src, fill_dst, self.fill_joint[i], available,
-                                     dst.inlet.get_total_water_volume())
+            v_dst = dst.inlet.get_total_water_volume()
+            v_eq = equalising_volume(fill_src, fill_dst, self.fill_joint[i], available, v_dst)
             if v_eq <= 0.0:
                 self.against_head_steps[i] += 1
-            q_swmm = float(self.q_held[i])        # SWMM's own (inlet-capped) flow, unsmoothed
-            inertia = (abs(q_swmm) * dt if q_swmm * q > 0.0 and not self.equalisation_strict
-                       else 0.0)
+            adverse = fill_dst.stage(v_dst) - fill_src.stage(available)
+            # SWMM's own (inlet-capped) flow, unsmoothed, only up to a small adverse head
+            inertia = inertia_floor(float(self.q_held[i]), q, dt, adverse,
+                                    self.inertia_max_adverse_head_m, self.equalisation_strict)
             capped = limit_transfer(want, v_eq, self.equalisation_factor, inertia)
             self.capped_volume[i] += want - capped
             want = capped
         if want <= 0.0:
             src.applied_Q = dst.applied_Q = 0.0
             return 0.0
-        before = src.total_applied_volume
         src.set_Q(-want / dt)
-        src()
-        taken = -(src.total_applied_volume - before)      # >= 0, what src really gave
+        taken = withdraw(src, want, dt)                   # >= 0, what src really gave (flat draw-down)
         if self.use_momentum_jet:
             dst.velocity = self._jet_velocity(i, taken / dt, toward_outlet=q > 0)
         dst.set_Q(taken / dt)
