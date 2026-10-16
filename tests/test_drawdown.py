@@ -197,12 +197,13 @@ def test_momentum_keeps_each_cells_velocity_and_dries_to_zero(tmp_path):
 
 # ------------------------------------------------------------------ the inertia tolerance
 def test_inertia_floor_runs_only_up_to_a_small_adverse_head():
-    assert INERTIA_MAX_ADVERSE_HEAD_M == 0.05
+    assert INERTIA_MAX_ADVERSE_HEAD_M == 0.10
     q_swmm, q, dt = 140.0, 160.0, 0.5
     assert inertia_floor(q_swmm, q, dt, adverse_head=-0.3) == pytest.approx(70.0)  # with head
     assert inertia_floor(q_swmm, q, dt, adverse_head=0.0) == pytest.approx(70.0)
-    assert inertia_floor(q_swmm, q, dt, adverse_head=0.04) == pytest.approx(70.0)  # tolerance
-    assert inertia_floor(q_swmm, q, dt, adverse_head=0.06) == 0.0
+    assert inertia_floor(q_swmm, q, dt, adverse_head=0.09) == pytest.approx(70.0)  # tolerance
+    assert inertia_floor(q_swmm, q, dt, adverse_head=0.11) == 0.0
+    assert inertia_floor(q_swmm, q, dt, adverse_head=0.24) == 0.0   # the ND surge's first step
     assert inertia_floor(q_swmm, q, dt, adverse_head=0.79) == 0.0   # the Towradgi ND surge
     assert inertia_floor(-q_swmm, q, dt, adverse_head=-1.0) == 0.0  # SWMM runs the other way
     assert inertia_floor(q_swmm, q, dt, adverse_head=0.0, strict=True) == 0.0

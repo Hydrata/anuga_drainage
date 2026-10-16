@@ -25,7 +25,7 @@ Design 1 (epic 3585 D6/D7, spike scope, host backend):
 * anti-oscillation (TASK-3771): the request is also capped at EQUALISATION_FACTOR x the
   volume that would bring the two regions' level-fill stages level, so a step never
   overshoots the level and nothing moves against the head, EXCEPT SWMM's own barrel flow (its
-  water-column inertia) while the adverse head is at most INERTIA_MAX_ADVERSE_HEAD_M, so by default the cap removes only what the coupler's smoothing adds
+  water-column inertia) while the adverse head is at most INERTIA_MAX_ADVERSE_HEAD_M (0.10 m), so by default the cap removes only what the coupler's smoothing adds
   on top of SWMM (the smoothed flow lags the head; uncapped, it drove the bridges' 53 s
   slosh); ``equalisation_strict=True`` caps SWMM's own flow too;
 * MPI (``distribute``) is NOT supported in the spike: the master-rank gather
@@ -175,11 +175,14 @@ def limit_transfer(want, v_eq, factor, inertia=0.0):
 
 
 #: TASK-3771: SWMM's own barrel flow may run on against the head (water-column inertia: the
-#: flume's decelerating barrel flows ~6 s past the head reversal) only while the ADVERSE head
+#: flume's decelerating barrel flows ~6-8 s past the head reversal) only while the ADVERSE head
 #: (receiving end's level-fill stage minus the giving end's) is at most this many metres.
 #: Beyond it the flow is capped like the rest (nothing against the head): on Towradgi the
-#: uncapped allowance moved 141 m3/s against a 0.79 m adverse head (Northern Distributor).
-INERTIA_MAX_ADVERSE_HEAD_M = 0.05
+#: uncapped allowance moved 141 m3/s against 0.24 then 0.79 m adverse head (Northern
+#: Distributor). 0.10 m because the flume's rigid-column reversal (0.9 m pipe,
+#: test_inlet_control_unsteady) legitimately runs to ~0.085 m adverse level-fill head before
+#: the barrel turns: 0.05 m reversed it 4 s early and FAILED that reference.
+INERTIA_MAX_ADVERSE_HEAD_M = 0.10
 
 
 def inertia_floor(q_swmm, q, dt, adverse_head, max_adverse_head=INERTIA_MAX_ADVERSE_HEAD_M,

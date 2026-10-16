@@ -273,9 +273,11 @@ def test_headwall_exchange_capped_at_half_the_level_and_never_against_head(tmp_p
     assert cs.against_head_steps[0] == 1
     cs.q_held[0] = -0.01                                  # SWMM's barrel still runs that way
     hw, tw = cs.stages()
-    assert hw[0] - tw[0] > 0.05                           # ...but against a 0.1 m adverse head:
-    assert cs._exchange(0, -1000.0, 0.5) == 0.0           # beyond the inertia tolerance (3771)
-    cs.inertia_max_adverse_head_m = 0.2                   # within a (wider) tolerance it runs
+    adverse = hw[0] - tw[0]                               # ...but against a ~0.1 m adverse head:
+    assert adverse > 0.05
+    cs.inertia_max_adverse_head_m = 0.5 * adverse         # beyond the inertia tolerance (3771)
+    assert cs._exchange(0, -1000.0, 0.5) == 0.0
+    cs.inertia_max_adverse_head_m = 2.0 * adverse         # within the tolerance it runs
     before = cs.ops_out[0].inlet.get_total_water_volume()
     assert cs._exchange(0, -1000.0, 0.5) == pytest.approx(-0.005, rel=1e-9)   # inertia only
     assert before - cs.ops_out[0].inlet.get_total_water_volume() == pytest.approx(0.005, rel=1e-9)
