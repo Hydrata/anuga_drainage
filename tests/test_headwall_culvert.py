@@ -241,7 +241,9 @@ def test_headwall_volume_clipped_to_available(tmp_path):
     domain.set_quantity("elevation", flume.bed, location="centroids")
     domain.set_quantity("stage", lambda x, y: np.where(x < 28.0, 0.05, -0.1),
                         location="centroids")
-    cs = attach_culverts(domain, [flume.culvert_dict()], workdir=str(tmp_path))
+    # the available clip on its own (the TASK-3771 equalisation cap is tested separately)
+    cs = attach_culverts(domain, [flume.culvert_dict()], workdir=str(tmp_path),
+                         equalisation_factor=None)
     src, dst = cs.ops_in[0], cs.ops_out[0]
     have = src.inlet.get_total_water_volume()
     assert have > 0
@@ -251,6 +253,44 @@ def test_headwall_volume_clipped_to_available(tmp_path):
     assert src.inlet.get_total_water_volume() == pytest.approx(0.0, abs=1e-12)
     assert dst.total_applied_volume == pytest.approx(have, rel=1e-12)
     assert cs._exchange(0, 1000.0, 0.5) == 0.0          # now dry: nothing moves
+    cs.finalize()
+
+
+def test_headwall_exchange_capped_at_half_the_level_and_never_against_head(tmp_path):
+    """TASK-3771: in the live coupler a huge request moves EQUALISATION_FACTOR x the volume
+    that levels the two regions, and a request against the head moves nothing."""
+    import anuga
+    from anuga_drainage.culverts.coupler import EQUALISATION_FACTOR, equalising_volume
+    domain = anuga.rectangular_cross_domain(60, 8, len1=60.0, len2=4.0)
+    domain.set_datadir(str(tmp_path))
+    domain.set_quantity("elevation", flume.bed, location="centroids")
+    domain.set_quantity("stage", lambda x, y: np.where(x < 28.0, 0.05, -0.05),
+                        location="centroids")             # both ends wet, inlet 0.1 m higher
+    cs = attach_culverts(domain, [flume.culvert_dict()], workdir=str(tmp_path))
+    src, dst = cs.ops_in[0], cs.ops_out[0]
+    domain.timestep = 0.5
+    assert cs._exchange(0, -1000.0, 0.5) == 0.0          # outlet -> inlet: against the head
+    assert cs.against_head_steps[0] == 1
+    cs.q_held[0] = -0.01                                  # SWMM's barrel still runs that way
+    hw, tw = cs.stages()
+    adverse = hw[0] - tw[0]                               # ...but against a ~0.1 m adverse head:
+    assert adverse > 0.05
+    cs.inertia_max_adverse_head_m = 0.5 * adverse         # beyond the inertia tolerance (3771)
+    assert cs._exchange(0, -1000.0, 0.5) == 0.0
+    cs.inertia_max_adverse_head_m = 2.0 * adverse         # within the tolerance it runs
+    before = cs.ops_out[0].inlet.get_total_water_volume()
+    assert cs._exchange(0, -1000.0, 0.5) == pytest.approx(-0.005, rel=1e-9)   # inertia only
+    assert before - cs.ops_out[0].inlet.get_total_water_volume() == pytest.approx(0.005, rel=1e-9)
+    cs.equalisation_strict = True                         # strict: not even SWMM's own flow
+    assert cs._exchange(0, -1000.0, 0.5) == 0.0
+    cs.q_held[0] = 0.0
+    v_src, v_dst = src.inlet.get_total_water_volume(), dst.inlet.get_total_water_volume()
+    v_eq = equalising_volume(cs.fill_in[0], cs.fill_out[0], cs.fill_joint[0], v_src, v_dst)
+    assert 0.0 < v_eq < v_src
+    moved = cs._exchange(0, 1000.0, 0.5)
+    assert moved == pytest.approx(EQUALISATION_FACTOR * v_eq, rel=1e-9)
+    hw, tw = cs.stages()
+    assert hw[0] > tw[0]                                  # still above: no overshoot
     cs.finalize()
 
 

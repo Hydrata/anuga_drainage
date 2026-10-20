@@ -3,8 +3,12 @@
 Design 1 (epic 3585 D6/D7, spike scope, host backend):
 
 * one operator registered on the domain; ANUGA calls it every internal step;
-* end stages are read on the HOST: stage = volume / area + area-weighted mean
-  bed level of each exchange region (in mode 2 the operator is not on the
+* end stages are read on the HOST as the LEVEL-FILL stage of each exchange
+  region: the level at which the region's water volume fills its own ground
+  (TASK-3771; equal to volume / area + area-weighted mean bed on a flat region,
+  the lowest ground when dry), so a region spanning a creek bed and the
+  embankment beside it reads the water level, not one biased up by the dry
+  embankment (in mode 2 the operator is not on the
   GPU-safe whitelist, so ``apply_fractional_steps`` syncs the host copy before
   the operator loop and pushes it back after; no device backend is needed);
 * SWMM advances in whole 1 s strides whenever the ANUGA step end passes the
@@ -13,7 +17,17 @@ Design 1 (epic 3585 D6/D7, spike scope, host backend):
 * Q is exchanged through two stock ``Inlet_operator``s per culvert, which the
   coupler calls itself (they are taken off the domain's operator list): the
   losing end is drawn down first, its request clipped to the water present,
-  and exactly the volume it gave up is added at the other end (mass exact);
+  and exactly the volume it gave up is added at the other end (mass exact).
+  The losing end is drawn down to a FLAT water surface (drawdown.withdraw,
+  TASK-3771), not by the stock operator's uniform-depth ``set_depths``, which on a
+  region spanning a creek bed and its bank lifted the bank water above the road
+  crest; the gaining end is filled by the stock ``set_stages_evenly``;
+* anti-oscillation (TASK-3771): the request is also capped at EQUALISATION_FACTOR x the
+  volume that would bring the two regions' level-fill stages level, so a step never
+  overshoots the level and nothing moves against the head, EXCEPT SWMM's own barrel flow (its
+  water-column inertia) while the adverse head is at most INERTIA_MAX_ADVERSE_HEAD_M (0.10 m), so by default the cap removes only what the coupler's smoothing adds
+  on top of SWMM (the smoothed flow lags the head; uncapped, it drove the bridges' 53 s
+  slosh); ``equalisation_strict=True`` caps SWMM's own flow too;
 * MPI (``distribute``) is NOT supported in the spike: the master-rank gather
   is deferred to design 2 / W3.
 
@@ -45,6 +59,7 @@ import os
 
 import numpy as np
 
+from .drawdown import withdraw
 from .inlet_control import BARREL, CONTROL_NAMES, NOT_TRACKED, InletControl
 from .spec import HeadwallCulvert
 from .swmm_engine import SwmmHeadwallEngine
@@ -76,9 +91,116 @@ class _Series:
         return arrays
 
 
-def _region_stage(inlet, mean_bed):
-    area = inlet.get_area()
-    return inlet.get_total_water_volume() / area + mean_bed
+class LevelFill:
+    """Stage from volume over one exchange region's own ground (TASK-3771).
+
+    The ground is static once the coupler is built (run_anuga carves before it), so the
+    cells are sorted once. ``stage(volume)`` is the level L with
+    sum(area_i * max(L - z_i, 0)) = volume: continuous and increasing in the volume,
+    the lowest ground at zero volume, and exactly volume / area + area-weighted mean bed
+    once every cell is under water (always so on a flat or carved-flat region, which is
+    the stage the coupler read before TASK-3771).
+    """
+
+    def __init__(self, elevations, areas):
+        order = np.argsort(np.asarray(elevations, dtype=float), kind="stable")
+        self.z = np.asarray(elevations, dtype=float)[order]
+        self.cum_a = np.cumsum(np.asarray(areas, dtype=float)[order])
+        self.cum_az = np.cumsum(np.asarray(areas, dtype=float)[order] * self.z)
+        # volume needed to bring the level up to each sorted cell's ground
+        self.v_at = self.cum_a * self.z - self.cum_az
+        self.mean_bed = float(self.cum_az[-1] / self.cum_a[-1])
+
+    def stage(self, volume):
+        volume = max(float(volume), 0.0)
+        k = int(np.searchsorted(self.v_at, volume, side="right")) - 1
+        k = min(max(k, 0), len(self.z) - 1)
+        return float((volume + self.cum_az[k]) / self.cum_a[k])
+
+    def volume(self, level):
+        """The inverse of :meth:`stage`: the water volume that fills the ground to ``level``
+        (0 at or below the lowest ground)."""
+        level = float(level)
+        k = int(np.searchsorted(self.z, level, side="right")) - 1
+        if k < 0:
+            return 0.0
+        return max(float(self.cum_a[k] * level - self.cum_az[k]), 0.0)
+
+
+def joint_fill(a, b):
+    """One LevelFill over two regions' ground together: its stage at their summed volume is
+    the common level the two would settle at if joined (TASK-3771 equalisation cap)."""
+    z = np.concatenate([a.z, b.z])
+    areas = np.concatenate([np.diff(a.cum_a, prepend=0.0), np.diff(b.cum_a, prepend=0.0)])
+    return LevelFill(z, areas)
+
+
+def equalising_volume(src, dst, joint, v_src, v_dst):
+    """The volume V (0 <= V <= v_src) whose transfer src -> dst brings the two regions' stages
+    level: stage_src(v_src - V) = stage_dst(v_dst + V), or V = v_src when even emptying src
+    leaves it above dst. 0 when src is not above dst (a transfer would run AGAINST the head).
+
+    Closed form on the sorted ground: both volumes are increasing piecewise-linear in the
+    level, so the common level is ``joint.stage(v_src + v_dst)`` and V = v_src - vol_src(L).
+    """
+    v_src, v_dst = max(float(v_src), 0.0), max(float(v_dst), 0.0)
+    if v_src <= 0.0:
+        return 0.0
+    level = joint.stage(v_src + v_dst)
+    return min(max(v_src - src.volume(level), 0.0), v_src)
+
+
+#: TASK-3771 anti-oscillation: one coupling step moves at most this fraction of the volume
+#: that would bring the two exchange regions level (see limit_transfer). The SWMM flow is held
+#: for a 1 s stride and smoothed, so it lags the head; without the cap a step can overshoot
+#: the level and drive the slosh (measured on the Northern Distributor bridge).
+EQUALISATION_FACTOR = 0.5
+
+
+def limit_transfer(want, v_eq, factor, inertia=0.0):
+    """Cap a transfer of ``want`` m3 (``factor`` None = no cap, the pre-3771 behaviour).
+
+    The cap is ``max(factor x v_eq, inertia)``: ``factor`` x the volume ``v_eq`` that levels
+    the two regions (0 when the transfer would run AGAINST the head), but never below
+    ``inertia``, the volume SWMM's OWN barrel flow moves in the step when it runs the same way.
+    That floor keeps the water column's inertia (a decelerating barrel flows on past the
+    level and a few seconds past the head reversal, as the rigid-column reference of
+    tests/test_inlet_control_unsteady.py requires) and removes only the flow the coupler's
+    smoothing adds on top of SWMM's. ``inertia=0`` is the STRICT cap: no step overshoots the
+    level and nothing moves against the head.
+    """
+    if factor is None:
+        return want
+    return min(want, max(factor * max(v_eq, 0.0), max(float(inertia), 0.0)))
+
+
+#: TASK-3771: SWMM's own barrel flow may run on against the head (water-column inertia: the
+#: flume's decelerating barrel flows ~6-8 s past the head reversal) only while the ADVERSE head
+#: (receiving end's level-fill stage minus the giving end's) is at most this many metres.
+#: Beyond it the flow is capped like the rest (nothing against the head): on Towradgi the
+#: uncapped allowance moved 141 m3/s against 0.24 then 0.79 m adverse head (Northern
+#: Distributor). 0.10 m because the flume's rigid-column reversal (0.9 m pipe,
+#: test_inlet_control_unsteady) legitimately runs to ~0.085 m adverse level-fill head before
+#: the barrel turns: 0.05 m reversed it 4 s early and FAILED that reference.
+INERTIA_MAX_ADVERSE_HEAD_M = 0.10
+
+
+def inertia_floor(q_swmm, q, dt, adverse_head, max_adverse_head=INERTIA_MAX_ADVERSE_HEAD_M,
+                  strict=False):
+    """The volume SWMM's own barrel flow ``q_swmm`` may move in a step of ``dt`` regardless of
+    the equalisation cap (see limit_transfer): ``|q_swmm| dt`` when it runs the same way as
+    the request ``q`` and the adverse head (m; > 0 means the transfer runs against the head)
+    is at most ``max_adverse_head``, else 0. ``max_adverse_head=None`` drops the head limit
+    (the 1400a90 behaviour); ``strict=True`` is always 0."""
+    if strict or not q_swmm * q > 0.0:
+        return 0.0
+    if max_adverse_head is not None and adverse_head > max_adverse_head:
+        return 0.0
+    return abs(float(q_swmm)) * float(dt)
+
+
+def _region_stage(inlet, fill):
+    return fill.stage(inlet.get_total_water_volume())
 
 
 #: Stage below bed by less than this (m) is float noise on a dry cell.
@@ -170,7 +292,9 @@ class HeadwallCulvertCoupler(CulvertSet):
 
     def __init__(self, domain, culverts, workdir, *, duration_s=None, routing_step=0.25,
                  smoothing_timescale=0.0, use_momentum_jet=False, record_every_s=1.0,
-                 extra_options=None, label="headwall_culverts"):
+                 extra_options=None, label="headwall_culverts",
+                 equalisation_factor=EQUALISATION_FACTOR, equalisation_strict=False,
+                 inertia_max_adverse_head_m=INERTIA_MAX_ADVERSE_HEAD_M):
         import anuga
 
         if getattr(domain, "numproc", 1) > 1:
@@ -180,15 +304,20 @@ class HeadwallCulvertCoupler(CulvertSet):
         CulvertSet.__init__(self, _as_culverts(culverts))
         self.domain = domain
         self.smoothing_timescale = float(smoothing_timescale)
+        self.equalisation_factor = (None if equalisation_factor is None
+                                    else float(equalisation_factor))
+        self.equalisation_strict = bool(equalisation_strict)
+        self.inertia_max_adverse_head_m = (None if inertia_max_adverse_head_m is None
+                                           else float(inertia_max_adverse_head_m))
         self.use_momentum_jet = bool(use_momentum_jet)
         self.record_every_s = float(record_every_s)
         if duration_s is None:
             duration_s = 7 * 86400
         n = len(self.culverts)
-        self.ops_in, self.ops_out, self.bed_in, self.bed_out = [], [], np.zeros(n), np.zeros(n)
+        self.ops_in, self.ops_out, self.fill_in, self.fill_out = [], [], [], []
         for i, c in enumerate(self.culverts):
-            for end, ops, bed in (("inlet", self.ops_in, self.bed_in),
-                                  ("outlet", self.ops_out, self.bed_out)):
+            for end, ops, fills in (("inlet", self.ops_in, self.fill_in),
+                                    ("outlet", self.ops_out, self.fill_out)):
                 region = anuga.Region(domain, polygon=c.exchange_polygon(end))
                 if len(region.indices) == 0:
                     raise ValueError(f"culvert {c.name!r}: the {end} exchange region holds "
@@ -198,7 +327,8 @@ class HeadwallCulvertCoupler(CulvertSet):
                 domain.fractional_step_operators.remove(op)
                 ops.append(op)
                 inl = op.inlet
-                bed[i] = float(np.sum(inl.get_elevations() * inl.get_areas()) / inl.get_area())
+                fills.append(LevelFill(inl.get_elevations(), inl.get_areas()))
+        self.fill_joint = [joint_fill(a, b) for a, b in zip(self.fill_in, self.fill_out)]
         hw0, tw0 = self.stages()
         self.engine_swmm = SwmmHeadwallEngine(self.culverts, workdir, duration_s=duration_s,
                                               routing_step=routing_step,
@@ -212,14 +342,16 @@ class HeadwallCulvertCoupler(CulvertSet):
         self.q_moved = np.zeros(n)         # flow actually moved in the last step (signed)
         self.requested_volume = np.zeros(n)  # sum |Q| dt requested
         self.applied_volume = np.zeros(n)    # sum of volume actually moved (signed, + in->out)
+        self.capped_volume = np.zeros(n)     # sum of volume the equalisation cap held back
+        self.against_head_steps = np.zeros(n, dtype=np.int64)  # steps whose request opposed the head
         self.t0 = None
         self._next_record = 0.0
         self.operator = _CouplerOperator(domain, self, label)
 
     # ---------------------------------------------------------------- per step
     def stages(self):
-        hw = np.array([_region_stage(op.inlet, b) for op, b in zip(self.ops_in, self.bed_in)])
-        tw = np.array([_region_stage(op.inlet, b) for op, b in zip(self.ops_out, self.bed_out)])
+        hw = np.array([_region_stage(op.inlet, f) for op, f in zip(self.ops_in, self.fill_in)])
+        tw = np.array([_region_stage(op.inlet, f) for op, f in zip(self.ops_out, self.fill_out)])
         return hw, tw
 
     def step(self):
@@ -282,13 +414,25 @@ class HeadwallCulvertCoupler(CulvertSet):
         _clamp_dry_noise(dst)
         available = src.inlet.get_total_water_volume()
         want = min(abs(q) * dt, available)
+        if self.equalisation_factor is not None and want > 0.0:
+            fill_src, fill_dst = ((self.fill_in[i], self.fill_out[i]) if q > 0
+                                  else (self.fill_out[i], self.fill_in[i]))
+            v_dst = dst.inlet.get_total_water_volume()
+            v_eq = equalising_volume(fill_src, fill_dst, self.fill_joint[i], available, v_dst)
+            if v_eq <= 0.0:
+                self.against_head_steps[i] += 1
+            adverse = fill_dst.stage(v_dst) - fill_src.stage(available)
+            # SWMM's own (inlet-capped) flow, unsmoothed, only up to a small adverse head
+            inertia = inertia_floor(float(self.q_held[i]), q, dt, adverse,
+                                    self.inertia_max_adverse_head_m, self.equalisation_strict)
+            capped = limit_transfer(want, v_eq, self.equalisation_factor, inertia)
+            self.capped_volume[i] += want - capped
+            want = capped
         if want <= 0.0:
             src.applied_Q = dst.applied_Q = 0.0
             return 0.0
-        before = src.total_applied_volume
         src.set_Q(-want / dt)
-        src()
-        taken = -(src.total_applied_volume - before)      # >= 0, what src really gave
+        taken = withdraw(src, want, dt)                   # >= 0, what src really gave (flat draw-down)
         if self.use_momentum_jet:
             dst.velocity = self._jet_velocity(i, taken / dt, toward_outlet=q > 0)
         dst.set_Q(taken / dt)
