@@ -1,0 +1,32 @@
+name: engine-pin
+
+# TASK-3740 (epic 3585): fails when the anuga_core SHA this fork's CI installs
+# (.github/actions/install-anuga-core default) differs from the prod engine pin, ARG
+# ANUGA_CORE_SHA in Hydrata/run_anuga batch/Dockerfile (public, read at main). The pin moves
+# in run_anuga, so the daily schedule is what catches drift between fork PRs.
+# Deliberately NOT a ruleset required check: a run_anuga pin bump must not block unrelated
+# fork PRs; a red here means "open the pin-bump PR".
+
+on:
+  schedule:
+    - cron: "30 17 * * *"   # daily, after slow.yml
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/actions/install-anuga-core/**
+      - .github/scripts/check_anuga_core_pin.sh
+      - .github/workflows/engine-pin.yml
+
+jobs:
+  engine-pin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: anuga_core pin equals run_anuga batch/Dockerfile ARG ANUGA_CORE_SHA
+        run: >-
+          .github/scripts/check_anuga_core_pin.sh
+          .github/actions/install-anuga-core/action.yml
+          https://raw.githubusercontent.com/Hydrata/run_anuga/main/batch/Dockerfile

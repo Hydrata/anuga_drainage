@@ -10,8 +10,9 @@ inputs:
   sha:
     description: >
       Hydrata/anuga_core commit. KEEP IN SYNC with ARG ANUGA_CORE_SHA in Hydrata/run_anuga
-      batch/Dockerfile (the prod engine pin; 93368189 = gpu-run-anuga-f2ddf27-main-93368189).
-    default: 93368189eb35eef847094dde027d6d6dcb2b0059
+      batch/Dockerfile (the prod engine pin; 1a496176 = fork main with the TASK-3772 collect_max
+      fix, fork PR #13). .github/workflows/engine-pin.yml fails when the two differ (TASK-3740).
+    default: 1a496176daad29ec32cb284ca2d45af2797f9a11
 outputs:
   core-dir:
     description: Absolute path of the anuga_core checkout.
