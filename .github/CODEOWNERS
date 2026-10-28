@@ -1,0 +1,5 @@
+# TASK-4004 (Hydrata epic 3995): operator reviews CI config and the coupler code.
+/.github/**                          @davekennewell
+/src/anuga_drainage/coupler.py       @davekennewell
+/src/anuga_drainage/coupling.py      @davekennewell
+/src/anuga_drainage/culverts/        @davekennewell
