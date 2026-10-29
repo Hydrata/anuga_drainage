@@ -19,12 +19,15 @@ on:
       - .github/scripts/check_anuga_core_pin.sh
       - .github/workflows/engine-pin.yml
 
+permissions:
+  contents: read
+
 jobs:
   engine-pin:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: anuga_core pin equals run_anuga batch/Dockerfile ARG ANUGA_CORE_SHA
         run: >-
           .github/scripts/check_anuga_core_pin.sh
