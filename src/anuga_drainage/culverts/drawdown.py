@@ -74,8 +74,9 @@ def withdraw(op, volume, dt):
     draw-down, with the stock operator's bookkeeping; returns the volume really removed.
 
     Momentum: each cell keeps its velocity (xmom, ymom scaled by new depth / old depth, zero
-    where the cell dries), or follows the operator's ``zero_velocity`` / ``velocity``
-    settings as the stock operator does.
+    where the cell dries), or is zeroed when the operator's ``zero_velocity`` is set. The
+    operator's ``velocity`` (an inflow jet) is NOT applied: a giving end keeps its own flow
+    (TASK-4356).
     """
     inlet = op.inlet
     domain = op.domain
@@ -91,9 +92,6 @@ def withdraw(op, volume, dt):
         if op.zero_velocity:
             inlet.set_xmoms(0.0)
             inlet.set_ymoms(0.0)
-        elif op.velocity is not None:
-            inlet.set_xmoms(new_depth * op.velocity[0])
-            inlet.set_ymoms(new_depth * op.velocity[1])
         else:
             ratio = np.divide(new_depth, old_depth, out=np.ones_like(new_depth),
                               where=old_depth > 0.0)          # a dry cell is left as it was
