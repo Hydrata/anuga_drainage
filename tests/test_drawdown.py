@@ -210,3 +210,54 @@ def test_inertia_floor_runs_only_up_to_a_small_adverse_head():
     # negative control: without the head limit (the 1400a90 floor) 0.79 m adverse moves it all
     assert inertia_floor(q_swmm, q, dt, adverse_head=0.79,
                          max_adverse_head=None) == pytest.approx(70.0)
+
+
+# ------------------------------------------------------------------ the momentum jet (TASK-4356)
+def test_a_jet_set_on_a_receiving_end_does_not_outlive_its_step(tmp_path):
+    """TASK-4356: a culvert runs backwards for one step (its inlet end RECEIVES, with the
+    momentum jet on), then forwards (that end GIVES). The giving end must scale its own
+    momentum by its depth ratio, not re-impose the jet of the earlier step: a stale jet
+    held the Towradgi Memorial Drive bridge's approach at ~3 mm/s and ponded it 0.5 m high
+    for the rest of the run (run 1615)."""
+    pytest.importorskip("pyswmm")
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import anuga
+    import _culvert_flume as flume
+    from anuga_drainage.culverts import attach_culverts
+
+    domain = anuga.rectangular_cross_domain(60, 8, len1=60.0, len2=4.0)
+    domain.set_datadir(str(tmp_path))
+    domain.set_quantity("elevation", flume.bed, location="centroids")
+    domain.set_quantity("stage", lambda x, y: np.where(x < 28.0, 0.3, 0.2),
+                        location="centroids")             # both ends 0.3 m deep
+    cs = attach_culverts(domain, [flume.culvert_dict()], workdir=str(tmp_path),
+                         use_momentum_jet=True, equalisation_factor=None)
+    end = cs.ops_in[0].inlet                              # the culvert's inlet-end region
+    domain.timestep = 0.5
+
+    # step 1, backwards: the inlet end RECEIVES and the jet points out of the barrel (-x)
+    moved = cs._exchange(0, -0.2, 0.5)
+    assert moved == pytest.approx(-0.1, rel=1e-9)
+    jet = cs._jet_velocity(0, 0.2, toward_outlet=False)
+    assert jet[0] < 0.0
+    np.testing.assert_allclose(end.get_xmoms(), end.get_depths() * jet[0], rtol=1e-12)
+    np.testing.assert_allclose(end.get_ymoms(), end.get_depths() * jet[1], atol=1e-15)
+
+    # the 2D flow then turns toward the barrel (+x) before the next coupler step
+    end.set_xmoms(0.3 * end.get_depths())
+    end.set_ymoms(0.0)
+    old_depth = end.get_depths()
+    old_x = end.get_xmoms()
+
+    # step 2, forwards: the same end now GIVES water
+    moved = cs._exchange(0, 0.2, 0.5)
+    assert moved == pytest.approx(0.1, rel=1e-9)
+    new_depth = end.get_depths()
+    assert np.all(new_depth < old_depth)
+    np.testing.assert_allclose(end.get_xmoms(), old_x * new_depth / old_depth, rtol=1e-12,
+                               err_msg="the giving end re-imposed the stale jet")
+    assert np.all(end.get_xmoms() > 0.0)
+    assert cs.ops_in[0].velocity is None and cs.ops_out[0].velocity is None
+    cs.finalize()

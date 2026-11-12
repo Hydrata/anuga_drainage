@@ -437,6 +437,10 @@ class HeadwallCulvertCoupler(CulvertSet):
             dst.velocity = self._jet_velocity(i, taken / dt, toward_outlet=q > 0)
         dst.set_Q(taken / dt)
         dst()
+        # The jet belongs to this step only: left set, it would be re-imposed on this
+        # region's momentum whenever the culvert later reverses and this end gives water
+        # (TASK-4356: a stale jet held a bridge approach at ~3 mm/s for the rest of the run).
+        dst.velocity = None
         return taken if q > 0 else -taken
 
     def _jet_velocity(self, i, q, toward_outlet):
